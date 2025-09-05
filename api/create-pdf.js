@@ -25,24 +25,15 @@ function wrapLines(text, font, size, maxWidth) {
   return lines;
 }
 
-/**
- * Zeichnet eine Section:
- * - Headline -> Text: 1× gap (normal)
- * - Abschnittsende -> nächste Headline: 3× gap
+/** Section-Abstände:
+ *  - Headline -> Body: 1× gap
+ *  - Body-Ende -> nächste Headline: 3× gap
  */
 function drawSection(
-  page,
-  fonts,
-  x,
-  y,
-  maxWidth,
-  heading,
-  body,
-  size = 12,
-  gap = 8 // Basisabstand
+  page, fonts, x, y, maxWidth, heading, body, size = 12, gap = 10
 ) {
-  const headlineGap = gap;      // nach Headline (Headline -> Body)
-  const sectionGap  = gap * 3;  // nach Abschnitt (Body-Ende -> nächste Headline)
+  const headlineGap = gap;
+  const sectionGap  = gap * 3;
 
   let cursorY = y;
 
@@ -51,26 +42,27 @@ function drawSection(
     page.drawText(String(heading), {
       x, y: cursorY, size: hSize, font: fonts.bold, color: rgb(0, 0, 0)
     });
-    cursorY -= hSize + headlineGap; // Headline-Abstand
+    cursorY -= hSize + headlineGap;
   }
 
   if (body) {
     const lines = wrapLines(String(body), fonts.regular, size, maxWidth);
     for (const ln of lines) {
       page.drawText(ln, { x, y: cursorY, size, font: fonts.regular, color: rgb(0,0,0) });
-      cursorY -= size + 2; // Zeilenabstand im Fließtext
+      cursorY -= size + 2;
       if (cursorY < 70) break;
     }
   }
 
-  // Abstand nach Abschnitt (bis zur nächsten Headline)
   return cursorY - sectionGap;
 }
 
 // --- Handler ---------------------------------------------------------
 export default async function handler(req, res) {
-  // CORS (falls später von deiner Domain aufgerufen)
-  res.setHeader("Access-Control-Allow-Origin", "https://burgundmerz.de");
+  // Für Browser kein Cache; für GPT nicht relevant, aber schadet nicht
+  res.setHeader("Cache-Control", "no-store");
+  // CORS nicht nötig für GPT (server-zu-server), aber wir lassen es offen:
+  res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") return res.status(200).end();
@@ -79,7 +71,7 @@ export default async function handler(req, res) {
   if (req.method !== "POST" && !isDemo) return res.status(405).send("Method Not Allowed");
 
   try {
-    // 1) Daten
+    // 1) Daten (Demo bei GET, sonst Body)
     const body = !isDemo ? (req.body || {}) : {
       gpt: {
         title: "Beispiel – Positionierung",
@@ -96,7 +88,6 @@ export default async function handler(req, res) {
 
     // 2) Content-PDF (Seite 2 & 3)
     const contentPdf = await PDFDocument.create();
-    // Fontkit registrieren, damit TTF-Fonts funktionieren
     contentPdf.registerFontkit(fontkit);
 
     // Fonts laden (Poppins), sonst Fallback Helvetica
@@ -107,18 +98,16 @@ export default async function handler(req, res) {
     const regFont = regBytes
       ? await contentPdf.embedFont(regBytes)
       : await contentPdf.embedFont(StandardFonts.Helvetica);
-
     const boldFont = boldBytes
       ? await contentPdf.embedFont(boldBytes)
       : await contentPdf.embedFont(StandardFonts.HelveticaBold);
-
     const fonts = { regular: regFont, bold: boldFont };
 
-    // A4
+    // A4-Layout
     const pageWidth = 595, pageHeight = 842;
     const margin = 56;
     const maxWidth = pageWidth - margin * 2;
-    const baseGap = 8; // Basisabstand, passend zum drawSection-Aufruf
+    const baseGap = 10;
 
     let page = contentPdf.addPage([pageWidth, pageHeight]);
     let y = pageHeight - margin;
@@ -126,23 +115,11 @@ export default async function handler(req, res) {
     // Titel
     const title = String(gpt.title || "Ergebnis");
     page.drawText(title, { x: margin, y, size: 20, font: fonts.bold, color: rgb(0,0,0) });
-    // nach dem Titel: 1,5× Basisabstand zusätzlich
-    y -= 28 + Math.round(baseGap * 1.5);
+    y -= 28 + Math.round(baseGap * 1.5); // 1,5× nach dem Titel
 
     // Sections
     for (const sec of sections) {
-      const nextY = drawSection(
-        page,
-        fonts,
-        margin,
-        y,
-        maxWidth,
-        sec.heading,
-        sec.text,
-        12,
-        baseGap // gap (headlineGap = 1×, sectionGap = 3×)
-      );
-
+      const nextY = drawSection(page, fonts, margin, y, maxWidth, sec.heading, sec.text, 12, baseGap);
       if (nextY < margin + 60) {
         page = contentPdf.addPage([pageWidth, pageHeight]);
         y = pageHeight - margin;
@@ -153,7 +130,7 @@ export default async function handler(req, res) {
 
     const contentBytes = await contentPdf.save();
 
-    // 3) Statische PDFs + Inhalt mergen
+    // 3) Statische PDFs + Inhalt mergen (Links bleiben erhalten)
     const merged = await PDFDocument.create();
 
     async function addPdfFromBytes(bytes) {
@@ -173,13 +150,48 @@ export default async function handler(req, res) {
 
     const finalBytes = await merged.save();
 
-    // 4) Direkt als Download ausliefern
+    // 4) Ausgabe-Modi für GPT Actions
+    const as = String((req.query?.as || "")).toLowerCase();
+
+    if (as === "json") {
+      // Rückgabe als Base64 (Fallback, wenn du keine URL willst)
+      const pdfBase64 = Buffer.from(finalBytes).toString("base64");
+      return res.status(200).json({
+        filename: "Ergebnis.pdf",
+        mime: "application/pdf",
+        pdfBase64
+      });
+    }
+
+    if (as === "url") {
+      // Upload zu Vercel Blob -> öffentlicher Link
+      try {
+        const { put } = await import("@vercel/blob");
+        const name = `reports/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.pdf`;
+        const { url } = await put(name, Buffer.from(finalBytes), {
+          access: "public",
+          contentType: "application/pdf"
+        });
+        return res.status(200).json({ url, filename: "Ergebnis.pdf" });
+      } catch (e) {
+        // Fallback: Base64, wenn Blob noch nicht aktiviert/ installiert
+        const pdfBase64 = Buffer.from(finalBytes).toString("base64");
+        return res.status(200).json({
+          filename: "Ergebnis.pdf",
+          mime: "application/pdf",
+          pdfBase64,
+          note: "Blob-Upload nicht verfügbar – Base64 zurückgegeben."
+        });
+      }
+    }
+
+    // Standard: direkt als Datei streamen (Browser-Use-Case)
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", 'attachment; filename="Ergebnis.pdf"');
-    res.status(200).send(Buffer.from(finalBytes));
+    return res.status(200).send(Buffer.from(finalBytes));
   } catch (err) {
     console.error(err);
-    res.status(500).json({
+    return res.status(500).json({
       error: "PDF-Erzeugung fehlgeschlagen",
       detail: String(err?.message || err)
     });

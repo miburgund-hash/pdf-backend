@@ -3,7 +3,7 @@ import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 import fontkit from "@pdf-lib/fontkit";
 import fs from "fs/promises";
 import path from "path";
-import { put } from "@vercel/blob";
+import { put } from "@vercel/blob";   // <--- Neu
 
 const STATIC_DIR = path.join(process.cwd(), "static");
 
@@ -34,9 +34,7 @@ function drawSection(page, fonts, x, y, maxWidth, heading, body, size = 12, gap 
     page.drawText(String(heading), {
       x, y: cursorY, size: hSize, font: fonts.bold, color: rgb(0, 0, 0)
     });
-
-    // Abstand nach Headline (1,5x Zeilenhöhe)
-    cursorY -= hSize * 1.5;
+    cursorY -= hSize + gap * 3;
   }
 
   if (body) {
@@ -46,9 +44,6 @@ function drawSection(page, fonts, x, y, maxWidth, heading, body, size = 12, gap 
       cursorY -= size + 2;
       if (cursorY < 70) break;
     }
-
-    // Abstand nach Body (3x Zeilenhöhe)
-    cursorY -= size * 3;
   }
 
   return cursorY - gap;
@@ -65,16 +60,13 @@ export default async function handler(req, res) {
   if (req.method !== "POST" && !isDemo) return res.status(405).send("Method Not Allowed");
 
   try {
-    // 1) Daten
     const body = !isDemo ? (req.body || {}) : {
       gpt: {
-        title: "Deine persönliche Positionierung",
+        title: "Beispiel – Positionierung",
         sections: [
-          { heading: "Dein Angebot", text: "Beschreibung deines Angebots." },
-          { heading: "Deine Zielgruppe", text: "Beschreibung deiner Zielgruppe." },
-          { heading: "Wichtige Trigger für deine Entscheider", text: "Typische Ängste:\n1. Angst vor Kosten\n2. Angst vor Verzögerungen\n\nTypische Ziele:\n1. Schnelle Umsetzung\n2. Hohe Wirkung\n\nTypische Vorurteile:\n1. Schon probiert\n2. Funktioniert nicht" },
-          { heading: "Vorteile deines Angebots", text: "Typische Ängste:\n1. Werden genommen\n\nTypische Ziele:\n1. Werden erfüllt\n\nTypische Vorurteile:\n1. Werden aufgelöst" },
-          { heading: "Dein Positionierungs-Vorschlag", text: "Hier steht der Vorschlag." }
+          { heading: "Ist-Situation", text: "Kurzer Überblick über Markt, Zielgruppe und aktuelle Angebote." },
+          { heading: "Zielbild", text: "Klare, spitze Positionierung mit messbarem Nutzen und eindeutiger Differenzierung." },
+          { heading: "Kernbotschaften", text: "Wir fokussieren uns auf XY. Schnell, verständlich, zuverlässig." }
         ]
       }
     };
@@ -82,7 +74,6 @@ export default async function handler(req, res) {
     const gpt = body.gpt || {};
     const sections = Array.isArray(gpt.sections) ? gpt.sections : [];
 
-    // 2) Content-PDF erzeugen
     const contentPdf = await PDFDocument.create();
     contentPdf.registerFontkit(fontkit);
 
@@ -100,7 +91,6 @@ export default async function handler(req, res) {
 
     const fonts = { regular: regFont, bold: boldFont };
 
-    // A4
     const pageWidth = 595, pageHeight = 842;
     const margin = 56;
     const maxWidth = pageWidth - margin * 2;
@@ -110,7 +100,7 @@ export default async function handler(req, res) {
 
     const title = String(gpt.title || "Ergebnis");
     page.drawText(title, { x: margin, y, size: 20, font: fonts.bold, color: rgb(0,0,0) });
-    y -= 32;
+    y -= 28;
 
     for (const sec of sections) {
       const nextY = drawSection(page, fonts, margin, y, maxWidth, sec.heading, sec.text, 12, 8);
@@ -122,37 +112,18 @@ export default async function handler(req, res) {
       }
     }
 
-    const contentBytes = await contentPdf.save();
+    const finalBytes = await contentPdf.save();
 
-    // 3) Statische PDFs + Inhalt mergen
-    const merged = await PDFDocument.create();
-
-    async function addPdfFromBytes(bytes) {
-      const src = await PDFDocument.load(bytes, { updateMetadata: false });
-      const pages = await merged.copyPages(src, src.getPageIndices());
-      pages.forEach(p => merged.addPage(p));
-    }
-
-    const deckblattBytes = await fs.readFile(path.join(STATIC_DIR, "deckblatt.pdf"));
-    const angebot1Bytes  = await fs.readFile(path.join(STATIC_DIR, "angebot1.pdf"));
-    const angebot2Bytes  = await fs.readFile(path.join(STATIC_DIR, "angebot2.pdf"));
-
-    await addPdfFromBytes(deckblattBytes);  // Seite 1
-    await addPdfFromBytes(contentBytes);    // Seite 2 & 3
-    await addPdfFromBytes(angebot1Bytes);   // Seite 4
-    await addPdfFromBytes(angebot2Bytes);   // Seite 5
-
-    const finalBytes = await merged.save();
-
-    // 4) Blob speichern statt direkt senden
-    const filename = `reports/${Date.now()}-Ergebnis.pdf`;
+    // 📌 Neu: Upload ins Vercel Blob Storage
+    const filename = `reports/${Date.now()}-positionierung.pdf`;
     const { url } = await put(filename, Buffer.from(finalBytes), {
       access: "public",
       contentType: "application/pdf"
     });
 
-    // 5) URL zurückgeben
+    // ✅ Statt PDF direkt schicken → URL zurückgeben
     res.status(200).json({ url });
+
   } catch (err) {
     console.error(err);
     res.status(500).json({

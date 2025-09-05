@@ -25,7 +25,25 @@ function wrapLines(text, font, size, maxWidth) {
   return lines;
 }
 
-function drawSection(page, fonts, x, y, maxWidth, heading, body, size = 12, gap = 6) {
+/**
+ * Zeichnet eine Section:
+ * - Headline -> Text: 1× gap (normal)
+ * - Abschnittsende -> nächste Headline: 3× gap
+ */
+function drawSection(
+  page,
+  fonts,
+  x,
+  y,
+  maxWidth,
+  heading,
+  body,
+  size = 12,
+  gap = 8 // Basisabstand
+) {
+  const headlineGap = gap;      // nach Headline (Headline -> Body)
+  const sectionGap  = gap * 3;  // nach Abschnitt (Body-Ende -> nächste Headline)
+
   let cursorY = y;
 
   if (heading) {
@@ -33,19 +51,20 @@ function drawSection(page, fonts, x, y, maxWidth, heading, body, size = 12, gap 
     page.drawText(String(heading), {
       x, y: cursorY, size: hSize, font: fonts.bold, color: rgb(0, 0, 0)
     });
-    cursorY -= hSize + gap * 3;
+    cursorY -= hSize + headlineGap; // Headline-Abstand
   }
 
   if (body) {
     const lines = wrapLines(String(body), fonts.regular, size, maxWidth);
     for (const ln of lines) {
       page.drawText(ln, { x, y: cursorY, size, font: fonts.regular, color: rgb(0,0,0) });
-      cursorY -= size + 2;
+      cursorY -= size + 2; // Zeilenabstand im Fließtext
       if (cursorY < 70) break;
     }
   }
 
-  return cursorY - gap;
+  // Abstand nach Abschnitt (bis zur nächsten Headline)
+  return cursorY - sectionGap;
 }
 
 // --- Handler ---------------------------------------------------------
@@ -77,7 +96,7 @@ export default async function handler(req, res) {
 
     // 2) Content-PDF (Seite 2 & 3)
     const contentPdf = await PDFDocument.create();
-    // >>> WICHTIG: Fontkit registrieren, damit TTF-Fonts funktionieren
+    // Fontkit registrieren, damit TTF-Fonts funktionieren
     contentPdf.registerFontkit(fontkit);
 
     // Fonts laden (Poppins), sonst Fallback Helvetica
@@ -99,16 +118,31 @@ export default async function handler(req, res) {
     const pageWidth = 595, pageHeight = 842;
     const margin = 56;
     const maxWidth = pageWidth - margin * 2;
+    const baseGap = 8; // Basisabstand, passend zum drawSection-Aufruf
 
     let page = contentPdf.addPage([pageWidth, pageHeight]);
     let y = pageHeight - margin;
 
+    // Titel
     const title = String(gpt.title || "Ergebnis");
     page.drawText(title, { x: margin, y, size: 20, font: fonts.bold, color: rgb(0,0,0) });
-    y -= 28;
+    // nach dem Titel: 1,5× Basisabstand zusätzlich
+    y -= 28 + Math.round(baseGap * 1.5);
 
+    // Sections
     for (const sec of sections) {
-      const nextY = drawSection(page, fonts, margin, y, maxWidth, sec.heading, sec.text, 12, 8);
+      const nextY = drawSection(
+        page,
+        fonts,
+        margin,
+        y,
+        maxWidth,
+        sec.heading,
+        sec.text,
+        12,
+        baseGap // gap (headlineGap = 1×, sectionGap = 3×)
+      );
+
       if (nextY < margin + 60) {
         page = contentPdf.addPage([pageWidth, pageHeight]);
         y = pageHeight - margin;

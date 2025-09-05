@@ -7,7 +7,6 @@ import path from "path";
 const STATIC_DIR = path.join(process.cwd(), "static");
 
 // --- Helfer ---------------------------------------------------------
-
 function wrapLines(text, font, size, maxWidth) {
   const words = String(text || "").split(/\s+/);
   const lines = [];
@@ -50,7 +49,6 @@ function drawSection(page, fonts, x, y, maxWidth, heading, body, size = 12, gap 
 }
 
 // --- Handler ---------------------------------------------------------
-
 export default async function handler(req, res) {
   // CORS (falls später von deiner Domain aufgerufen)
   res.setHeader("Access-Control-Allow-Origin", "https://burgundmerz.de");
@@ -153,4 +151,3 @@ export default async function handler(req, res) {
     });
   }
 }
-

@@ -3,11 +3,11 @@ import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 import fontkit from "@pdf-lib/fontkit";
 import fs from "fs/promises";
 import path from "path";
-import { put } from "@vercel/blob";   // <--- Neu
+import { put } from "@vercel/blob";   // <--- wichtig
 
 const STATIC_DIR = path.join(process.cwd(), "static");
 
-// --- Helfer ---------------------------------------------------------
+// --- Helfer: Zeilen umbrechen -------------------------------------
 function wrapLines(text, font, size, maxWidth) {
   const words = String(text || "").split(/\s+/);
   const lines = [];
@@ -34,6 +34,7 @@ function drawSection(page, fonts, x, y, maxWidth, heading, body, size = 12, gap 
     page.drawText(String(heading), {
       x, y: cursorY, size: hSize, font: fonts.bold, color: rgb(0, 0, 0)
     });
+    // mehr Abstand nach Überschrift
     cursorY -= hSize + gap * 3;
   }
 
@@ -49,8 +50,9 @@ function drawSection(page, fonts, x, y, maxWidth, heading, body, size = 12, gap 
   return cursorY - gap;
 }
 
-// --- Handler ---------------------------------------------------------
+// --- API-Handler ---------------------------------------------------
 export default async function handler(req, res) {
+  // CORS locker für Tests
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -60,6 +62,7 @@ export default async function handler(req, res) {
   if (req.method !== "POST" && !isDemo) return res.status(405).send("Method Not Allowed");
 
   try {
+    // 1) Daten holen (oder Demo)
     const body = !isDemo ? (req.body || {}) : {
       gpt: {
         title: "Beispiel – Positionierung",
@@ -74,55 +77,55 @@ export default async function handler(req, res) {
     const gpt = body.gpt || {};
     const sections = Array.isArray(gpt.sections) ? gpt.sections : [];
 
-    const contentPdf = await PDFDocument.create();
-    contentPdf.registerFontkit(fontkit);
+    // 2) PDF erstellen
+    const doc = await PDFDocument.create();
+    doc.registerFontkit(fontkit);
 
+    // Poppins laden (fallback Helvetica)
     let regBytes = null, boldBytes = null;
     try { regBytes = await fs.readFile(path.join(STATIC_DIR, "Poppins-Regular.ttf")); } catch {}
     try { boldBytes = await fs.readFile(path.join(STATIC_DIR, "Poppins-SemiBold.ttf")); } catch {}
 
     const regFont = regBytes
-      ? await contentPdf.embedFont(regBytes)
-      : await contentPdf.embedFont(StandardFonts.Helvetica);
+      ? await doc.embedFont(regBytes)
+      : await doc.embedFont(StandardFonts.Helvetica);
 
     const boldFont = boldBytes
-      ? await contentPdf.embedFont(boldBytes)
-      : await contentPdf.embedFont(StandardFonts.HelveticaBold);
+      ? await doc.embedFont(boldBytes)
+      : await doc.embedFont(StandardFonts.HelveticaBold);
 
     const fonts = { regular: regFont, bold: boldFont };
 
-    const pageWidth = 595, pageHeight = 842;
-    const margin = 56;
-    const maxWidth = pageWidth - margin * 2;
-
-    let page = contentPdf.addPage([pageWidth, pageHeight]);
-    let y = pageHeight - margin;
+    const W = 595, H = 842, M = 56;
+    const maxWidth = W - 2 * M;
+    let page = doc.addPage([W, H]);
+    let y = H - M;
 
     const title = String(gpt.title || "Ergebnis");
-    page.drawText(title, { x: margin, y, size: 20, font: fonts.bold, color: rgb(0,0,0) });
+    page.drawText(title, { x: M, y, size: 20, font: fonts.bold, color: rgb(0,0,0) });
     y -= 28;
 
     for (const sec of sections) {
-      const nextY = drawSection(page, fonts, margin, y, maxWidth, sec.heading, sec.text, 12, 8);
-      if (nextY < margin + 60) {
-        page = contentPdf.addPage([pageWidth, pageHeight]);
-        y = pageHeight - margin;
+      const nextY = drawSection(page, fonts, M, y, maxWidth, sec.heading, sec.text, 12, 8);
+      if (nextY < M + 60) {
+        page = doc.addPage([W, H]);
+        y = H - M;
       } else {
         y = nextY;
       }
     }
 
-    const finalBytes = await contentPdf.save();
+    const pdfBytes = await doc.save();
 
-    // 📌 Neu: Upload ins Vercel Blob Storage
-    const filename = `reports/${Date.now()}-positionierung.pdf`;
-    const { url } = await put(filename, Buffer.from(finalBytes), {
+    // 3) In den Vercel Blob hochladen und URL zurückgeben
+    const filename = `reports/${Date.now()}-Ergebnis.pdf`;
+    const { url } = await put(filename, Buffer.from(pdfBytes), {
       access: "public",
       contentType: "application/pdf"
     });
 
-    // ✅ Statt PDF direkt schicken → URL zurückgeben
-    res.status(200).json({ url });
+    // WICHTIG: Nur diese Blob-URL zurückgeben
+    res.status(200).json({ url, filename });
 
   } catch (err) {
     console.error(err);
@@ -132,3 +135,4 @@ export default async function handler(req, res) {
     });
   }
 }
+

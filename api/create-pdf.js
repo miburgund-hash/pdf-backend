@@ -1,11 +1,12 @@
 // /api/create-pdf.js
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
+import fontkit from "@pdf-lib/fontkit";
 import fs from "fs/promises";
 import path from "path";
 
 const STATIC_DIR = path.join(process.cwd(), "static");
 
-// --- kleine Helfer ---------------------------------------------------------
+// --- Helfer ---------------------------------------------------------
 
 function wrapLines(text, font, size, maxWidth) {
   const words = String(text || "").split(/\s+/);
@@ -41,30 +42,27 @@ function drawSection(page, fonts, x, y, maxWidth, heading, body, size = 12, gap 
     for (const ln of lines) {
       page.drawText(ln, { x, y: cursorY, size, font: fonts.regular, color: rgb(0,0,0) });
       cursorY -= size + 2;
-      if (cursorY < 70) break; // Sicherheitsabstand zum Seitenende
+      if (cursorY < 70) break;
     }
   }
 
   return cursorY - gap;
 }
 
-// --- Haupt-Handler ---------------------------------------------------------
+// --- Handler ---------------------------------------------------------
 
 export default async function handler(req, res) {
-  // CORS falls du später von burgundmerz.de anfragst
+  // CORS (falls später von deiner Domain aufgerufen)
   res.setHeader("Access-Control-Allow-Origin", "https://burgundmerz.de");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") return res.status(200).end();
 
-  // Für schnellen Browser-Test erlaubt GET eine Demo
   const isDemo = req.method === "GET";
-  if (req.method !== "POST" && !isDemo) {
-    return res.status(405).send("Method Not Allowed");
-  }
+  if (req.method !== "POST" && !isDemo) return res.status(405).send("Method Not Allowed");
 
   try {
-    // ----- 1) Daten holen -----
+    // 1) Daten
     const body = !isDemo ? (req.body || {}) : {
       gpt: {
         title: "Beispiel – Positionierung",
@@ -79,10 +77,12 @@ export default async function handler(req, res) {
     const gpt = body.gpt || {};
     const sections = Array.isArray(gpt.sections) ? gpt.sections : [];
 
-    // ----- 2) Content-PDF (Seite 2 & 3) erzeugen -----
+    // 2) Content-PDF (Seite 2 & 3)
     const contentPdf = await PDFDocument.create();
+    // >>> WICHTIG: Fontkit registrieren, damit TTF-Fonts funktionieren
+    contentPdf.registerFontkit(fontkit);
 
-    // Fonts laden (Poppins, sonst Fallback Helvetica)
+    // Fonts laden (Poppins), sonst Fallback Helvetica
     let regBytes = null, boldBytes = null;
     try { regBytes = await fs.readFile(path.join(STATIC_DIR, "Poppins-Regular.ttf")); } catch {}
     try { boldBytes = await fs.readFile(path.join(STATIC_DIR, "Poppins-SemiBold.ttf")); } catch {}
@@ -97,12 +97,12 @@ export default async function handler(req, res) {
 
     const fonts = { regular: regFont, bold: boldFont };
 
-    // A4 Maße und Layout
+    // A4
     const pageWidth = 595, pageHeight = 842;
     const margin = 56;
     const maxWidth = pageWidth - margin * 2;
 
-    let page = contentPdf.addPage([pageWidth, pageHeight]); // Seite 2
+    let page = contentPdf.addPage([pageWidth, pageHeight]);
     let y = pageHeight - margin;
 
     const title = String(gpt.title || "Ergebnis");
@@ -112,7 +112,6 @@ export default async function handler(req, res) {
     for (const sec of sections) {
       const nextY = drawSection(page, fonts, margin, y, maxWidth, sec.heading, sec.text, 12, 8);
       if (nextY < margin + 60) {
-        // neue Seite (Seite 3 etc.)
         page = contentPdf.addPage([pageWidth, pageHeight]);
         y = pageHeight - margin;
       } else {
@@ -122,7 +121,7 @@ export default async function handler(req, res) {
 
     const contentBytes = await contentPdf.save();
 
-    // ----- 3) Statische PDFs laden & alles mergen -----
+    // 3) Statische PDFs + Inhalt mergen
     const merged = await PDFDocument.create();
 
     async function addPdfFromBytes(bytes) {
@@ -131,24 +130,27 @@ export default async function handler(req, res) {
       pages.forEach(p => merged.addPage(p));
     }
 
-    // Achtung: Dateinamen müssen exakt so heißen
     const deckblattBytes = await fs.readFile(path.join(STATIC_DIR, "deckblatt.pdf"));
     const angebot1Bytes  = await fs.readFile(path.join(STATIC_DIR, "angebot1.pdf"));
     const angebot2Bytes  = await fs.readFile(path.join(STATIC_DIR, "angebot2.pdf"));
 
     await addPdfFromBytes(deckblattBytes);  // Seite 1
-    await addPdfFromBytes(contentBytes);    // Seite 2 & 3 (dein Inhalt)
+    await addPdfFromBytes(contentBytes);    // Seite 2 & 3
     await addPdfFromBytes(angebot1Bytes);   // Seite 4
     await addPdfFromBytes(angebot2Bytes);   // Seite 5
 
     const finalBytes = await merged.save();
 
-    // ----- 4) Direkt als Download zurückgeben -----
+    // 4) Direkt als Download ausliefern
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", 'attachment; filename="Ergebnis.pdf"');
     res.status(200).send(Buffer.from(finalBytes));
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "PDF-Erzeugung fehlgeschlagen", detail: String(err?.message || err) });
+    res.status(500).json({
+      error: "PDF-Erzeugung fehlgeschlagen",
+      detail: String(err?.message || err)
+    });
   }
 }
+

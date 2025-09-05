@@ -3,6 +3,7 @@ import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 import fontkit from "@pdf-lib/fontkit";
 import fs from "fs/promises";
 import path from "path";
+import { put } from "@vercel/blob";
 
 const STATIC_DIR = path.join(process.cwd(), "static");
 
@@ -25,16 +26,7 @@ function wrapLines(text, font, size, maxWidth) {
   return lines;
 }
 
-/** Section-Abstände:
- *  - Headline -> Body: 1× gap
- *  - Body-Ende -> nächste Headline: 3× gap
- */
-function drawSection(
-  page, fonts, x, y, maxWidth, heading, body, size = 12, gap = 10
-) {
-  const headlineGap = gap;
-  const sectionGap  = gap * 3;
-
+function drawSection(page, fonts, x, y, maxWidth, heading, body, size = 12, gap = 6) {
   let cursorY = y;
 
   if (heading) {
@@ -42,7 +34,9 @@ function drawSection(
     page.drawText(String(heading), {
       x, y: cursorY, size: hSize, font: fonts.bold, color: rgb(0, 0, 0)
     });
-    cursorY -= hSize + headlineGap;
+
+    // Abstand nach Headline (1,5x Zeilenhöhe)
+    cursorY -= hSize * 1.5;
   }
 
   if (body) {
@@ -52,16 +46,16 @@ function drawSection(
       cursorY -= size + 2;
       if (cursorY < 70) break;
     }
+
+    // Abstand nach Body (3x Zeilenhöhe)
+    cursorY -= size * 3;
   }
 
-  return cursorY - sectionGap;
+  return cursorY - gap;
 }
 
 // --- Handler ---------------------------------------------------------
 export default async function handler(req, res) {
-  // Für Browser kein Cache; für GPT nicht relevant, aber schadet nicht
-  res.setHeader("Cache-Control", "no-store");
-  // CORS nicht nötig für GPT (server-zu-server), aber wir lassen es offen:
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -71,14 +65,16 @@ export default async function handler(req, res) {
   if (req.method !== "POST" && !isDemo) return res.status(405).send("Method Not Allowed");
 
   try {
-    // 1) Daten (Demo bei GET, sonst Body)
+    // 1) Daten
     const body = !isDemo ? (req.body || {}) : {
       gpt: {
-        title: "Beispiel – Positionierung",
+        title: "Deine persönliche Positionierung",
         sections: [
-          { heading: "Ist-Situation", text: "Kurzer Überblick über Markt, Zielgruppe und aktuelle Angebote." },
-          { heading: "Zielbild", text: "Klare, spitze Positionierung mit messbarem Nutzen und eindeutiger Differenzierung." },
-          { heading: "Kernbotschaften", text: "Wir fokussieren uns auf XY. Schnell, verständlich, zuverlässig." }
+          { heading: "Dein Angebot", text: "Beschreibung deines Angebots." },
+          { heading: "Deine Zielgruppe", text: "Beschreibung deiner Zielgruppe." },
+          { heading: "Wichtige Trigger für deine Entscheider", text: "Typische Ängste:\n1. Angst vor Kosten\n2. Angst vor Verzögerungen\n\nTypische Ziele:\n1. Schnelle Umsetzung\n2. Hohe Wirkung\n\nTypische Vorurteile:\n1. Schon probiert\n2. Funktioniert nicht" },
+          { heading: "Vorteile deines Angebots", text: "Typische Ängste:\n1. Werden genommen\n\nTypische Ziele:\n1. Werden erfüllt\n\nTypische Vorurteile:\n1. Werden aufgelöst" },
+          { heading: "Dein Positionierungs-Vorschlag", text: "Hier steht der Vorschlag." }
         ]
       }
     };
@@ -86,11 +82,10 @@ export default async function handler(req, res) {
     const gpt = body.gpt || {};
     const sections = Array.isArray(gpt.sections) ? gpt.sections : [];
 
-    // 2) Content-PDF (Seite 2 & 3)
+    // 2) Content-PDF erzeugen
     const contentPdf = await PDFDocument.create();
     contentPdf.registerFontkit(fontkit);
 
-    // Fonts laden (Poppins), sonst Fallback Helvetica
     let regBytes = null, boldBytes = null;
     try { regBytes = await fs.readFile(path.join(STATIC_DIR, "Poppins-Regular.ttf")); } catch {}
     try { boldBytes = await fs.readFile(path.join(STATIC_DIR, "Poppins-SemiBold.ttf")); } catch {}
@@ -98,28 +93,27 @@ export default async function handler(req, res) {
     const regFont = regBytes
       ? await contentPdf.embedFont(regBytes)
       : await contentPdf.embedFont(StandardFonts.Helvetica);
+
     const boldFont = boldBytes
       ? await contentPdf.embedFont(boldBytes)
       : await contentPdf.embedFont(StandardFonts.HelveticaBold);
+
     const fonts = { regular: regFont, bold: boldFont };
 
-    // A4-Layout
+    // A4
     const pageWidth = 595, pageHeight = 842;
     const margin = 56;
     const maxWidth = pageWidth - margin * 2;
-    const baseGap = 10;
 
     let page = contentPdf.addPage([pageWidth, pageHeight]);
     let y = pageHeight - margin;
 
-    // Titel
     const title = String(gpt.title || "Ergebnis");
     page.drawText(title, { x: margin, y, size: 20, font: fonts.bold, color: rgb(0,0,0) });
-    y -= 28 + Math.round(baseGap * 1.5); // 1,5× nach dem Titel
+    y -= 32;
 
-    // Sections
     for (const sec of sections) {
-      const nextY = drawSection(page, fonts, margin, y, maxWidth, sec.heading, sec.text, 12, baseGap);
+      const nextY = drawSection(page, fonts, margin, y, maxWidth, sec.heading, sec.text, 12, 8);
       if (nextY < margin + 60) {
         page = contentPdf.addPage([pageWidth, pageHeight]);
         y = pageHeight - margin;
@@ -130,7 +124,7 @@ export default async function handler(req, res) {
 
     const contentBytes = await contentPdf.save();
 
-    // 3) Statische PDFs + Inhalt mergen (Links bleiben erhalten)
+    // 3) Statische PDFs + Inhalt mergen
     const merged = await PDFDocument.create();
 
     async function addPdfFromBytes(bytes) {
@@ -150,48 +144,18 @@ export default async function handler(req, res) {
 
     const finalBytes = await merged.save();
 
-    // 4) Ausgabe-Modi für GPT Actions
-    const as = String((req.query?.as || "")).toLowerCase();
+    // 4) Blob speichern statt direkt senden
+    const filename = `reports/${Date.now()}-Ergebnis.pdf`;
+    const { url } = await put(filename, Buffer.from(finalBytes), {
+      access: "public",
+      contentType: "application/pdf"
+    });
 
-    if (as === "json") {
-      // Rückgabe als Base64 (Fallback, wenn du keine URL willst)
-      const pdfBase64 = Buffer.from(finalBytes).toString("base64");
-      return res.status(200).json({
-        filename: "Ergebnis.pdf",
-        mime: "application/pdf",
-        pdfBase64
-      });
-    }
-
-    if (as === "url") {
-      // Upload zu Vercel Blob -> öffentlicher Link
-      try {
-        const { put } = await import("@vercel/blob");
-        const name = `reports/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.pdf`;
-        const { url } = await put(name, Buffer.from(finalBytes), {
-          access: "public",
-          contentType: "application/pdf"
-        });
-        return res.status(200).json({ url, filename: "Ergebnis.pdf" });
-      } catch (e) {
-        // Fallback: Base64, wenn Blob noch nicht aktiviert/ installiert
-        const pdfBase64 = Buffer.from(finalBytes).toString("base64");
-        return res.status(200).json({
-          filename: "Ergebnis.pdf",
-          mime: "application/pdf",
-          pdfBase64,
-          note: "Blob-Upload nicht verfügbar – Base64 zurückgegeben."
-        });
-      }
-    }
-
-    // Standard: direkt als Datei streamen (Browser-Use-Case)
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", 'attachment; filename="Ergebnis.pdf"');
-    return res.status(200).send(Buffer.from(finalBytes));
+    // 5) URL zurückgeben
+    res.status(200).json({ url });
   } catch (err) {
     console.error(err);
-    return res.status(500).json({
+    res.status(500).json({
       error: "PDF-Erzeugung fehlgeschlagen",
       detail: String(err?.message || err)
     });

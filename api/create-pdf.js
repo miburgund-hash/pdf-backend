@@ -33,7 +33,7 @@ function drawSection(page, fonts, x, y, maxWidth, heading, body, size = 12, gap 
     page.drawText(String(heading), {
       x, y: cursorY, size: hSize, font: fonts.bold, color: rgb(0, 0, 0)
     });
-    cursorY -= hSize + gap;
+    cursorY -= hSize + gap * 3;
   }
 
   if (body) {

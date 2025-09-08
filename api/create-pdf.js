@@ -3,260 +3,303 @@ import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 import fontkit from "@pdf-lib/fontkit";
 import fs from "fs/promises";
 import path from "path";
-import { put } from "@vercel/blob";
 
 const STATIC_DIR = path.join(process.cwd(), "static");
 
-// ---------- Layout ----------
+// -------------------- Layout & Typografie --------------------
 const A4 = { w: 595, h: 842 };
 const MARGIN = 56;
-const MAX_W = A4.w - MARGIN * 2;
+const CONTENT_W = A4.w - MARGIN * 2;
 
-const FONT_SIZE = {
-  title: 28,   // H1
-  shl: 18,     // Abschnitts-Headline
-  sub: 14,     // Sub-Headline (Typische Ängste/Ziele/Vorurteile)
-  body: 12,
+const SIZE = {
+  HL: 28,
+  SHL: 18,
+  MINI: 14,
+  TEXT: 12,
 };
 
 const GAP = {
-  afterTitle: 16,        // H1 -> erste SHL (kompakt)
-  afterSHL: 8,           // SHL -> Absatz (kleiner)
-  afterParagraph: 30,    // Absatz -> nächste SHL (groß ~3×)
-  betweenGroups: 18,     // Ängste -> Ziele -> Vorurteile
-  afterTriggerBlock: 30, // nach Trigger -> Vorteile (3×)
-  line: 4,               // Abstand zwischen Zeilen
-  indent: 16,            // Einrückung Beispiele
+  HL_to_SHL1: 22,         // halbiert ggü. vorher
+  SHL_to_TEXT_small: 8,   // etwas kleiner
+  PARA_to_next_SHL: 36,   // 3x so groß
+  BETWEEN_LINES: 2,       // Zeilenabstand Text
+  MINI_AFTER: 10,         // etwas größerer Abstand nach "Typische Ängste/Ziele/Vorurteile"
+  BLOCK_AFTER: 16,        // normaler Blockabstand
+  BIG_AFTER: 28,          // 3x für große Trenner
+  ADV_POINT_AFTER: 10,    // Abstand zwischen Zahlpunkt und den Bullets
+  ADV_BULLET_AFTER: 6,    // Zeilenabstand Bullets
+  ADV_POINT_BLOCK: 14,    // größerer Abstand nach dem zweiten Bullet bis zum nächsten Punkt
 };
 
-// ---------- Helpers ----------
-function newPage(doc) {
-  const page = doc.addPage([A4.w, A4.h]);
-  return [page, A4.h - MARGIN];
-}
-function ensureSpace(doc, fonts, page, y, needed) {
-  if (y - needed < MARGIN) return newPage(doc);
-  return [page, y];
-}
-function wrap(text, font, size, maxWidth) {
+const COLOR = {
+  BLACK: rgb(0,0,0)
+};
+
+// -------------------- Text-Wrapping --------------------
+function wrapLines(text, font, size, maxWidth) {
   const words = String(text || "").split(/\s+/);
-  const out = [];
+  const lines = [];
   let line = "";
   for (const w of words) {
-    const test = line ? line + " " + w : w;
-    if (font.widthOfTextAtSize(test, size) > maxWidth && line) {
-      out.push(line);
+    const t = line ? line + " " + w : w;
+    if (font.widthOfTextAtSize(t, size) > maxWidth && line) {
+      lines.push(line);
       line = w;
     } else {
-      line = test;
+      line = t;
     }
   }
-  if (line) out.push(line);
-  return out;
+  if (line) lines.push(line);
+  return lines;
 }
-function drawLines(doc, page, fonts, x, y, lines, size, font) {
+
+// -------------------- Low-level draw helpers --------------------
+function drawTextBlock(page, font, text, x, y, size, color, maxWidth, lineGap = GAP.BETWEEN_LINES) {
+  const lines = wrapLines(text, font, size, maxWidth);
+  let cy = y;
   for (const ln of lines) {
-    [page, y] = ensureSpace(doc, fonts, page, y, size + GAP.line);
-    page.drawText(ln, { x, y, size, font, color: rgb(0, 0, 0) });
-    y -= size + GAP.line;
+    page.drawText(ln, { x, y: cy, size, font, color });
+    cy -= size + lineGap;
   }
-  return [page, y];
+  return cy;
 }
-function drawParagraph(doc, page, fonts, text, x, y) {
-  // trennt harte Zeilenumbrüche
-  const parts = String(text || "").split(/\n{2,}/); // Absätze
-  for (const p of parts) {
-    const lines = p.split(/\n/).flatMap(line =>
-      wrap(line, fonts.regular, FONT_SIZE.body, MAX_W)
-    );
-    [page, y] = drawLines(doc, page, fonts, x, y, lines, FONT_SIZE.body, fonts.regular);
-    y -= GAP.line; // kleiner Puffer zwischen Zeilengruppen
+
+function ensureSpace(doc, page, y, needed) {
+  if (y - needed < MARGIN) {
+    page = doc.addPage([A4.w, A4.h]);
+    return { page, y: A4.h - MARGIN };
   }
-  return y;
+  return { page, y };
 }
-function drawSHL(doc, page, fonts, text, x, y) {
-  [page, y] = ensureSpace(doc, fonts, page, y, FONT_SIZE.shl + GAP.afterSHL);
-  page.drawText(text, { x, y, size: FONT_SIZE.shl, font: fonts.bold, color: rgb(0, 0, 0) });
-  return [page, y - (FONT_SIZE.shl + GAP.afterSHL)];
-}
-function drawSubHL(doc, page, fonts, text, x, y) {
-  [page, y] = ensureSpace(doc, fonts, page, y, FONT_SIZE.sub + GAP.line);
-  page.drawText(text, { x, y, size: FONT_SIZE.sub, font: fonts.bold, color: rgb(0, 0, 0) });
-  return [page, y - (FONT_SIZE.sub + GAP.line)];
-}
-function drawNumberedList(doc, page, fonts, items, x, y) {
-  let idx = 1;
-  for (const raw of items) {
-    const item = String(raw || "");
-    const prefix = `${idx}. `;
-    const pw = fonts.regular.widthOfTextAtSize(prefix, FONT_SIZE.body);
-    const lines = wrap(item, fonts.regular, FONT_SIZE.body, MAX_W - pw);
 
-    [page, y] = ensureSpace(doc, fonts, page, y, FONT_SIZE.body + GAP.line);
-    page.drawText(prefix, { x, y, size: FONT_SIZE.body, font: fonts.regular, color: rgb(0, 0, 0) });
-    page.drawText(lines[0] || "", { x: x + pw, y, size: FONT_SIZE.body, font: fonts.regular, color: rgb(0, 0, 0) });
-    y -= FONT_SIZE.body + GAP.line;
+// -------------------- Block renderers --------------------
+function drawHeadline(doc, page, fonts, title, y) {
+  const { bold } = fonts;
+  ({ page, y } = ensureSpace(doc, page, y, SIZE.HL + GAP.HL_to_SHL1));
+  page.drawText(title, { x: MARGIN, y, size: SIZE.HL, font: bold, color: COLOR.BLACK });
+  y -= SIZE.HL + GAP.HL_to_SHL1;
+  return { page, y };
+}
 
-    for (let i = 1; i < lines.length; i++) {
-      [page, y] = ensureSpace(doc, fonts, page, y, FONT_SIZE.body + GAP.line);
-      page.drawText(lines[i], { x: x + pw, y, size: FONT_SIZE.body, font: fonts.regular, color: rgb(0, 0, 0) });
-      y -= FONT_SIZE.body + GAP.line;
-    }
-    idx++;
+function drawSubHeadline(doc, page, fonts, text, y) {
+  const { bold } = fonts;
+  ({ page, y } = ensureSpace(doc, page, y, SIZE.SHL + GAP.SHL_to_TEXT_small));
+  page.drawText(text, { x: MARGIN, y, size: SIZE.SHL, font: bold, color: COLOR.BLACK });
+  y -= SIZE.SHL + GAP.SHL_to_TEXT_small;
+  return { page, y };
+}
+
+function drawMiniHeadline(doc, page, fonts, text, y) {
+  const { bold } = fonts;
+  ({ page, y } = ensureSpace(doc, page, y, SIZE.MINI + GAP.MINI_AFTER));
+  page.drawText(text, { x: MARGIN, y, size: SIZE.MINI, font: bold, color: COLOR.BLACK });
+  y -= SIZE.MINI + GAP.MINI_AFTER; // etwas größerer Abstand nach "Typische …"
+  return { page, y };
+}
+
+function drawParagraph(doc, page, fonts, text, y) {
+  const { regular } = fonts;
+  ({ page, y } = ensureSpace(doc, page, y, SIZE.TEXT * 3));
+  y = drawTextBlock(page, regular, text, MARGIN, y, SIZE.TEXT, COLOR.BLACK, CONTENT_W);
+  y -= GAP.PARA_to_next_SHL; // großer Abstand bis zur nächsten SHL
+  return { page, y };
+}
+
+function drawNumberedList(doc, page, fonts, items, y) {
+  const { regular } = fonts;
+  for (let i = 0; i < items.length; i++) {
+    ({ page, y } = ensureSpace(doc, page, y, SIZE.TEXT * 2));
+    const prefix = `${i+1}. `;
+    const preWidth = regular.widthOfTextAtSize(prefix, SIZE.TEXT);
+    page.drawText(prefix, { x: MARGIN, y, size: SIZE.TEXT, font: regular, color: COLOR.BLACK });
+    y = drawTextBlock(page, regular, items[i], MARGIN + preWidth, y, SIZE.TEXT, COLOR.BLACK, CONTENT_W - preWidth);
+    y -= GAP.BLOCK_AFTER;
   }
-  return [page, y];
-}
-function drawNumberedListWithExamples(doc, page, fonts, items, x, y) {
-  let idx = 1;
-  for (const it of items) {
-    const title = String(it?.title || "");
-    const prefix = `${idx}. `;
-    const pw = fonts.regular.widthOfTextAtSize(prefix, FONT_SIZE.body);
-    const titleLines = wrap(title, fonts.regular, FONT_SIZE.body, MAX_W - pw);
-
-    // Titelzeile
-    [page, y] = ensureSpace(doc, fonts, page, y, FONT_SIZE.body + GAP.line);
-    page.drawText(prefix, { x, y, size: FONT_SIZE.body, font: fonts.regular, color: rgb(0, 0, 0) });
-    page.drawText(titleLines[0] || "", { x: x + pw, y, size: FONT_SIZE.body, font: fonts.regular, color: rgb(0, 0, 0) });
-    y -= FONT_SIZE.body + GAP.line;
-
-    // evtl.weitere Titelzeilen
-    for (let i = 1; i < titleLines.length; i++) {
-      [page, y] = ensureSpace(doc, fonts, page, y, FONT_SIZE.body + GAP.line);
-      page.drawText(titleLines[i], { x: x + pw, y, size: FONT_SIZE.body, font: fonts.regular, color: rgb(0, 0, 0) });
-      y -= FONT_SIZE.body + GAP.line;
-    }
-
-    // Beispiele (nicht fett, eigene Zeilen, eingerückt)
-    for (const [bIdx, ex] of (it.examples || []).entries()) {
-      if (!ex) continue;
-      const bullet = `- Bsp. ${bIdx + 1}: `;
-      const bw = fonts.regular.widthOfTextAtSize(bullet, FONT_SIZE.body);
-      const exLines = wrap(ex, fonts.regular, FONT_SIZE.body, MAX_W - pw - GAP.indent - bw);
-
-      [page, y] = ensureSpace(doc, fonts, page, y, FONT_SIZE.body + GAP.line);
-      page.drawText(bullet, { x: x + pw + GAP.indent, y, size: FONT_SIZE.body, font: fonts.regular, color: rgb(0, 0, 0) });
-      page.drawText(exLines[0] || "", { x: x + pw + GAP.indent + bw, y, size: FONT_SIZE.body, font: fonts.regular, color: rgb(0, 0, 0) });
-      y -= FONT_SIZE.body + GAP.line;
-
-      for (let i = 1; i < exLines.length; i++) {
-        [page, y] = ensureSpace(doc, fonts, page, y, FONT_SIZE.body + GAP.line);
-        page.drawText(exLines[i], { x: x + pw + GAP.indent + bw, y, size: FONT_SIZE.body, font: fonts.regular, color: rgb(0, 0, 0) });
-        y -= FONT_SIZE.body + GAP.line;
-      }
-    }
-
-    y -= GAP.line; // kleiner Abstand zum nächsten Listeneintrag
-    idx++;
-  }
-  return [page, y];
+  // etwas mehr Luft nach ganzer Liste:
+  y -= GAP.BLOCK_AFTER;
+  return { page, y };
 }
 
-// ---------- Parser (robust) ----------
-function isListLine(line) {
-  return /^\d+[\.\)]\s+/.test(line) || /^[•\-]\s+/.test(line) || (!!line && !/^Typische\s+/i.test(line));
-}
-function stripListPrefix(line) {
-  return line.replace(/^\d+[\.\)]\s+/, "").replace(/^[•\-]\s+/, "");
-}
+// -------------------- "Wichtige Trigger …" parser (kleine SHLs + Listen) --------------------
+function drawTriggersSection(doc, page, fonts, bodyText, y) {
+  // Erwartet Blöcke "Typische Ängste:", "Typische Ziele:", "Typische Vorurteile:"
+  const blocks = bodyText.split(/\n\s*\n/).map(b => b.trim()).filter(Boolean);
 
-function parseTriggerText(raw = "") {
-  const out = [];
-  let current = null;
-  const lines = raw.replace(/\r/g, "").split("\n");
-
-  for (const rawLine of lines) {
-    const line = rawLine.trim();
-    if (!line) continue;
-
-    const m = /^Typische\s+(Ängste|Ziele|Vorurteile)\s*:?\s*$/i.exec(line);
+  for (const block of blocks) {
+    let m = block.match(/^Typische\s+(Ängste|Ziele|Vorurteile)\s*:\s*/i);
     if (m) {
-      if (current) out.push(current);
-      current = { title: `Typische ${m[1]}`, items: [] };
-      continue;
-    }
-    if (current && isListLine(line)) current.items.push(stripListPrefix(line));
-  }
-  if (current) out.push(current);
-  return out;
-}
+      const label = `Typische ${m[1]}`;
+      const rest = block.replace(/^Typische\s+(Ängste|Ziele|Vorurteile)\s*:\s*/i, "");
 
-function parseBenefitsText(raw = "") {
-  const out = [];
-  let current = null;
-  const lines = raw.replace(/\r/g, "").split("\n");
+      ({ page, y } = drawMiniHeadline(doc, page, fonts, label, y));
 
-  const isHeader = (s) => /^Typische\s+(Ängste|Ziele|Vorurteile)/i.test((s || "").trim());
-  const exInline1 = /\s[–—-]\s*(Beispiel|Bsp\.?)\s*1\s*:\s*/i;
-  const exInline2 = /\s[–—-]\s*(Beispiel|Bsp\.?)\s*2\s*:\s*/i;
-  const exLine = /^(?:[•\-]\s*)?(?:Beispiel|Bsp\.?)\s*([12])\s*:\s*(.+)$/i;
+      // nummerierte Einträge extrahieren: "1. …" pro Zeile
+      const items = rest
+        .split(/\n/)
+        .map(s => s.replace(/^\d+\.\s*/, "").trim())
+        .filter(Boolean);
 
-  for (let i = 0; i < lines.length; i++) {
-    let line = (lines[i] || "").trim();
-    if (!line) continue;
-
-    if (isHeader(line)) {
-      if (current) out.push(current);
-      current = { title: line.replace(/\s*[-–—]\s*Beispiele:?$/i, "").trim(), items: [] };
-      continue;
-    }
-    if (!current) continue;
-    if (!isListLine(line)) continue;
-
-    // Grundtitel
-    let title = stripListPrefix(line);
-    let ex1 = null, ex2 = null;
-
-    // Inline "– Beispiel 1: … – Beispiel 2: …"
-    if (exInline1.test(title)) {
-      const [t, rest] = title.split(exInline1);
-      title = t.trim();
-      if (exInline2.test(rest)) {
-        const [p1, p2] = rest.split(exInline2);
-        ex1 = (p1 || "").trim();
-        ex2 = (p2 || "").trim();
-      } else {
-        ex1 = rest.trim();
-      }
+      ({ page, y } = drawNumberedList(doc, page, fonts, items, y));
     } else {
-      // Beispiele in Folgezeilen
-      let j = i + 1;
-      while (j < lines.length) {
-        const m = exLine.exec((lines[j] || "").trim());
-        if (!m) break;
-        (m[1] === "1" ? (ex1 = m[2].trim()) : (ex2 = m[2].trim()));
-        j++;
-      }
-      i = j - 1;
+      // Fallback: als Paragraph darstellen
+      ({ page, y } = drawParagraph(doc, page, fonts, block, y));
     }
-    current.items.push({ title: title.trim(), examples: [ex1, ex2].filter(Boolean) });
   }
-  if (current) out.push(current);
-  return out;
+  return { page, y };
 }
 
-// ---------- Handler ----------
+// -------------------- "Vorteile deines Angebots" (NEU: verschachtelte Struktur) -------------
+function parseAdvantages(text) {
+  // Robuster Parser: erkennt beide Formate
+  //  A) Mehrzeilig:
+  //     1. Cyberangriff
+  //        - Beispiel 1
+  //        - Beispiel 2
+  //  B) Kompakt:
+  //     1. Cyberangriff – Beispiel 1 – Beispiel 2
+  const lines = text.split(/\n/).map(l => l.trim()).filter(Boolean);
+
+  const groups = [];        // [{ title: 'Cyberangriff', bullets:['Bsp1','Bsp2'] }, ...]
+  let current = null;
+
+  for (const ln of lines) {
+    if (/^\d+\.\s*/.test(ln)) {
+      // Neuer Punkt
+      if (current) groups.push(current);
+      const after = ln.replace(/^\d+\.\s*/, "");
+      // kompakt mit " – "?
+      const parts = after.split(/\s+–\s+/);
+      if (parts.length >= 3) {
+        current = {
+          title: parts[0],
+          bullets: parts.slice(1, 3) // max 2 Beispiele
+        };
+      } else {
+        current = { title: after, bullets: [] };
+      }
+    } else if (/^\-\s+/.test(ln)) {
+      // Bullet-Zeile
+      if (!current) current = { title: "", bullets: [] };
+      current.bullets.push(ln.replace(/^\-\s+/, ""));
+    } else if (/^Typische\s+(Ängste|Ziele|Vorurteile)/i.test(ln)) {
+      // Mini-Headline ignorieren – Behandlung außerhalb
+      continue;
+    } else {
+      // lose Zeile: falls kompakt Format mit " – " ohne Nummer
+      const parts = ln.split(/\s+–\s+/);
+      if (parts.length >= 3) {
+        if (current) groups.push(current);
+        current = { title: parts[0], bullets: parts.slice(1, 3) };
+      }
+    }
+  }
+  if (current) groups.push(current);
+  return groups;
+}
+
+function drawAdvantagesGroup(doc, page, fonts, title, bullets, y) {
+  const { regular } = fonts;
+
+  // Titelzeile (nicht fett)
+  ({ page, y } = ensureSpace(doc, page, y, SIZE.TEXT * 2));
+  // "1. " Nummerierung erzeugen? Das übernimmt der Aufrufer.
+  y = drawTextBlock(page, regular, title, MARGIN, y, SIZE.TEXT, COLOR.BLACK, CONTENT_W);
+  y -= GAP.ADV_POINT_AFTER;
+
+  // zwei Bullets, jeweils neue Zeile, eingerückt, NICHT fett
+  for (let i = 0; i < bullets.length; i++) {
+    ({ page, y } = ensureSpace(doc, page, y, SIZE.TEXT * 2));
+    const bullet = `• ${bullets[i]}`;
+    y = drawTextBlock(page, regular, bullet, MARGIN + 18, y, SIZE.TEXT, COLOR.BLACK, CONTENT_W - 18);
+    y -= GAP.ADV_BULLET_AFTER;
+  }
+
+  // größerer Abstand nach dem Block
+  y -= GAP.ADV_POINT_BLOCK;
+  return { page, y };
+}
+
+function drawAdvantagesSection(doc, page, fonts, bodyText, y) {
+  // Wir erwarten Teilblöcke "Typische Ängste", "Typische Ziele", "Typische Vorurteile"
+  const chunks = bodyText
+    .split(/\n(?=Typische\s+(Ängste|Ziele|Vorurteile))/i)
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  for (const chunk of chunks) {
+    const m = chunk.match(/^Typische\s+(Ängste|Ziele|Vorurteile)\s*/i);
+    if (!m) continue;
+    const label = `Typische ${m[1]}`;
+    const rest = chunk.replace(/^Typische\s+(Ängste|Ziele|Vorurteile)\s*/i, "").trim();
+
+    // Mini-Headline
+    ({ page, y } = drawMiniHeadline(doc, page, fonts, label, y));
+
+    // Punkte + Bullets rendern
+    const groups = parseAdvantages(rest);
+    for (let i = 0; i < groups.length; i++) {
+      const numTitle = `${i + 1}. ${groups[i].title}`;
+      ({ page, y } = drawAdvantagesGroup(doc, page, fonts, numTitle, groups[i].bullets.slice(0,2), y));
+    }
+
+    // Nach jedem Block etwas mehr Luft
+    y -= GAP.BLOCK_AFTER;
+  }
+  // am Ende noch extra Abstand
+  y -= GAP.BLOCK_AFTER;
+  return { page, y };
+}
+
+// -------------------- Handler --------------------
 export default async function handler(req, res) {
-  // CORS (falls Domain-übergreifend)
+  // CORS falls nötig
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") return res.status(200).end();
 
-  const as = (req.query?.as || "json").toLowerCase();
   const isDemo = req.method === "GET";
+  if (req.method !== "POST" && !isDemo) return res.status(405).send("Method Not Allowed");
 
   try {
-    // 1) Daten
+    // ----- Payload -----
     const body = !isDemo ? (req.body || {}) : {
       gpt: {
         title: "Deine persönliche Positionierung",
         sections: [
-          { heading: "Dein Angebot", text: "…" },
-          { heading: "Deine Zielgruppe", text: "…" },
-          { heading: "Wichtige Trigger für deine Entscheider", text: "Typische Ängste:\n1. …\n…\n\nTypische Ziele:\n1. …\n…\n\nTypische Vorurteile:\n1. …" },
-          { heading: "Vorteile deines Angebots", text: "Typische Ängste\n1. Titel – Beispiel 1: … – Beispiel 2: …\n\nTypische Ziele\n…" },
-          { heading: "Dein Positionierungs-Vorschlag", text: "…" }
+          { heading: "Dein Angebot", text: "Demo-Fließtext …" },
+          { heading: "Deine Zielgruppe", text: "Demo-Fließtext …" },
+          { heading: "Wichtige Trigger für deine Entscheider", text:
+`Typische Ängste:
+1. Punkt A
+2. Punkt B
+3. Punkt C
+
+Typische Ziele:
+1. Ziel A
+2. Ziel B
+
+Typische Vorurteile:
+1. Vorurteil A
+2. Vorurteil B`
+          },
+          { heading: "Vorteile deines Angebots", text:
+`Typische Ängste
+1. Cyberangriff
+   - Penetrationstests & Updates – 0 Ausfälle …
+   - "Ihre Klinik läuft auch …"
+
+Typische Ziele
+1. Mehr Zeit
+   - Dokumentationszeit reduziert …
+   - Mehr Zeit am Patienten …
+
+Typische Vorurteile
+1. "Das dauert ewig"
+   - Schrittweise Einführung …
+   - Max. 2h Downtime …`
+          },
+          { heading: "Dein Positionierungs-Vorschlag", text: "In X Wochen zu …" }
         ]
       }
     };
@@ -264,106 +307,83 @@ export default async function handler(req, res) {
     const gpt = body.gpt || {};
     const sections = Array.isArray(gpt.sections) ? gpt.sections : [];
 
-    // 2) Content-PDF (Seite 2ff.)
-    const content = await PDFDocument.create();
-    content.registerFontkit(fontkit);
+    // ----- Content PDF -----
+    const doc = await PDFDocument.create();
+    doc.registerFontkit(fontkit);
 
-    // Fonts laden
+    // Fonts
     let regBytes = null, boldBytes = null;
     try { regBytes = await fs.readFile(path.join(STATIC_DIR, "Poppins-Regular.ttf")); } catch {}
     try { boldBytes = await fs.readFile(path.join(STATIC_DIR, "Poppins-SemiBold.ttf")); } catch {}
-
-    const regular = regBytes ? await content.embedFont(regBytes) : await content.embedFont(StandardFonts.Helvetica);
-    const bold    = boldBytes ? await content.embedFont(boldBytes) : await content.embedFont(StandardFonts.HelveticaBold);
+    const regular = regBytes ? await doc.embedFont(regBytes) : await doc.embedFont(StandardFonts.Helvetica);
+    const bold    = boldBytes ? await doc.embedFont(boldBytes) : await doc.embedFont(StandardFonts.HelveticaBold);
     const fonts   = { regular, bold };
 
-    // erste Content-Seite
-    let [page, y] = newPage(content);
+    let page = doc.addPage([A4.w, A4.h]);
+    let y = A4.h - MARGIN;
 
-    // H1
-    page.drawText(String(gpt.title || "Ergebnis"), {
-      x: MARGIN, y, size: FONT_SIZE.title, font: bold, color: rgb(0, 0, 0)
-    });
-    y -= FONT_SIZE.title + GAP.afterTitle;
+    // Title
+    ({ page, y } = drawHeadline(doc, page, fonts, String(gpt.title || "Ergebnis"), y));
 
-    // Sektionen
+    // Sections
     for (const sec of sections) {
-      const heading = String(sec.heading || "");
-      const txt     = String(sec.text || "");
+      const heading = String(sec.heading || "").trim();
+      const text    = String(sec.text || "").trim();
+      if (!heading) continue;
 
-      // Überschrift
-      [page, y] = drawSHL(content, page, fonts, heading, MARGIN, y);
+      ({ page, y } = drawSubHeadline(doc, page, fonts, heading, y));
 
       if (/^Wichtige Trigger/i.test(heading)) {
-        const groups = parseTriggerText(txt);
-
-        for (let i = 0; i < groups.length; i++) {
-          const g = groups[i];
-          [page, y] = drawSubHL(content, page, fonts, g.title, MARGIN, y);
-          [page, y] = drawNumberedList(content, page, fonts, g.items, MARGIN, y);
-
-          if (i < groups.length - 1) y -= GAP.betweenGroups; // Abstand Ängste -> Ziele -> Vorurteile
-        }
-        y -= GAP.afterTriggerBlock; // großer Abstand zu „Vorteile …“
-
-      } else if (/^Vorteile.*Angebots/i.test(heading)) {
-        const groups = parseBenefitsText(txt);
-
-        for (let i = 0; i < groups.length; i++) {
-          const g = groups[i];
-          [page, y] = drawSubHL(content, page, fonts, g.title, MARGIN, y);
-          [page, y] = drawNumberedListWithExamples(content, page, fonts, g.items, MARGIN, y);
-
-          if (i < groups.length - 1) y -= GAP.betweenGroups;
-        }
-        y -= GAP.afterParagraph; // Abstand zur nächsten SHL
-
+        ({ page, y } = drawTriggersSection(doc, page, fonts, text, y));
+      } else if (/^Vorteile deines Angebots/i.test(heading)) {
+        ({ page, y } = drawAdvantagesSection(doc, page, fonts, text, y));
       } else {
-        // normaler Fließtext
-        y = drawParagraph(content, page, fonts, txt, MARGIN, y);
-        y -= GAP.afterParagraph;
+        ({ page, y } = drawParagraph(doc, page, fonts, text, y));
+      }
+
+      // Seitenumbruch falls knapp:
+      if (y < MARGIN + 60) {
+        page = doc.addPage([A4.w, A4.h]);
+        y = A4.h - MARGIN;
       }
     }
 
-    const contentBytes = await content.save();
+    const contentBytes = await doc.save();
 
-    // 3) Statische PDFs + Content mergen
+    // ----- Merge statische PDFs (1,4,5) -----
     const merged = await PDFDocument.create();
 
     async function addPdf(bytes) {
       const src = await PDFDocument.load(bytes, { updateMetadata: false });
-      const cp = await merged.copyPages(src, src.getPageIndices());
-      cp.forEach(p => merged.addPage(p));
+      const pages = await merged.copyPages(src, src.getPageIndices());
+      for (const p of pages) merged.addPage(p);
     }
 
-    // Seite 1 (Deckblatt), dann Content, dann Angebot 1 & 2
-    try {
-      await addPdf(await fs.readFile(path.join(STATIC_DIR, "deckblatt.pdf")));
-    } catch {}
+    // Seite 1: Deckblatt
+    const deckblattBytes = await fs.readFile(path.join(STATIC_DIR, "deckblatt.pdf"));
+    await addPdf(deckblattBytes);
+
+    // Seite 2..n: Content
     await addPdf(contentBytes);
-    try {
-      await addPdf(await fs.readFile(path.join(STATIC_DIR, "angebot1.pdf")));
-    } catch {}
-    try {
-      await addPdf(await fs.readFile(path.join(STATIC_DIR, "angebot2.pdf")));
-    } catch {}
+
+    // Seite 4: Angebot 1
+    const angebot1Bytes = await fs.readFile(path.join(STATIC_DIR, "angebot1.pdf"));
+    await addPdf(angebot1Bytes);
+
+    // Seite 5: Angebot 2
+    const angebot2Bytes = await fs.readFile(path.join(STATIC_DIR, "angebot2.pdf"));
+    await addPdf(angebot2Bytes);
 
     const finalBytes = await merged.save();
 
-    // 4) Auslieferung
-    if (as === "url") {
-      const filename = `reports/${Date.now()}-${(gpt.title || "Ergebnis").replace(/[^\p{L}\p{N}\-_ ]/gu, "").replace(/\s+/g, "-").slice(0, 80)}.pdf`;
-      const { url } = await put(filename, Buffer.from(finalBytes), { access: "public", contentType: "application/pdf" });
-      res.status(200).json({ url });
-    } else {
-      res.setHeader("Content-Type", "application/pdf");
-      res.setHeader("Content-Disposition", 'attachment; filename="Ergebnis.pdf"');
-      res.status(200).send(Buffer.from(finalBytes));
-    }
+    // ----- Response -----
+    // Wenn ?as=url vom Actions-Test gesetzt → Blob / Storage machen (wird in deiner Actions-Implementierung erledigt)
+    // Hier liefern wir das PDF direkt:
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", 'attachment; filename="Ergebnis.pdf"');
+    res.status(200).send(Buffer.from(finalBytes));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "PDF-Erzeugung fehlgeschlagen", detail: String(err?.message || err) });
   }
 }
-
-

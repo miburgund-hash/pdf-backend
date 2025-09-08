@@ -7,7 +7,7 @@ import { put } from "@vercel/blob";
 
 const STATIC_DIR = path.join(process.cwd(), "static");
 
-// ------------------ Hilfsfunktionen ------------------
+// ---------- Helpers --------------------------------------------------
 function wrapLines(text, font, size, maxWidth) {
   const words = String(text || "").split(/\s+/);
   const lines = [];
@@ -26,13 +26,13 @@ function wrapLines(text, font, size, maxWidth) {
   return lines;
 }
 
-function drawSection(page, fonts, x, y, maxWidth, heading, body, size = 12, gap = 6) {
+function drawSection(page, fonts, x, y, maxWidth, heading, body, size = 12, gap = 8) {
   let cursorY = y;
 
   if (heading) {
     const hSize = 16;
     page.drawText(String(heading), { x, y: cursorY, size: hSize, font: fonts.bold, color: rgb(0,0,0) });
-    cursorY -= hSize + gap * 3;
+    cursorY -= hSize + gap * 3; // extra Abstand nach Headline
   }
 
   if (body) {
@@ -40,80 +40,101 @@ function drawSection(page, fonts, x, y, maxWidth, heading, body, size = 12, gap 
     for (const ln of lines) {
       page.drawText(ln, { x, y: cursorY, size, font: fonts.regular, color: rgb(0,0,0) });
       cursorY -= size + 2;
-      if (cursorY < 70) break; // Seitenumbruch, wenn zu wenig Platz
+      if (cursorY < 70) break;
     }
   }
-
   return cursorY - gap;
 }
 
-function slug(str, fallback = "Ergebnis") {
-  const s = String(str || fallback).trim().replace(/[^\w\-]+/g, "-").replace(/-+/g, "-");
-  return s || fallback;
+function validatePayload(gpt) {
+  const problems = [];
+  if (!gpt || typeof gpt !== "object") {
+    problems.push("gpt fehlt oder ist kein Objekt.");
+    return { valid: false, problems };
+  }
+  if (!gpt.title || String(gpt.title).trim().length < 3) {
+    problems.push("title fehlt/zu kurz.");
+  }
+  if (!Array.isArray(gpt.sections) || gpt.sections.length < 3) {
+    problems.push("sections fehlt oder hat zu wenig Einträge (>=3).");
+  } else {
+    gpt.sections.forEach((s, i) => {
+      if (!s || typeof s !== "object") problems.push(`sections[${i}] ist kein Objekt.`);
+      if (!s.heading || String(s.heading).trim().length < 3) problems.push(`sections[${i}].heading fehlt/zu kurz.`);
+      if (!s.text || String(s.text).trim().length < 3) problems.push(`sections[${i}].text fehlt/zu kurz.`);
+    });
+  }
+  return { valid: problems.length === 0, problems };
 }
 
-// ------------------ Handler ------------------
+// ---------- Handler --------------------------------------------------
 export default async function handler(req, res) {
-  // CORS locker
-  res.setHeader("Access-Control-Allow-Origin", "*");
+  // CORS
+  res.setHeader("Access-Control-Allow-Origin", "https://burgundmerz.de");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") return res.status(200).end();
 
-  const isDemo = req.method === "GET"; // Demo bei GET
-  if (req.method !== "POST" && !isDemo) {
-    return res.status(405).send("Method Not Allowed");
-  }
+  const wantUrlOnly = req.query.as === "url";
+  const debugMode   = req.query.debug === "1";
 
   try {
-    // 1) Daten
+    const isDemo = req.method === "GET"; // GET = Demo-Inhalte
     const body = !isDemo ? (req.body || {}) : {
       gpt: {
-        title: "Deine persönliche Positionierung",
+        title: "Beispiel – Positionierung (Demo)",
         sections: [
-          { heading: "Dein Angebot", text: "Wir bieten digitale Lösungen für den Mittelstand." },
-          { heading: "Deine Zielgruppe", text: "Geschäftsführer und Entscheider in KMU." },
-          { heading: "Wichtige Trigger für deine Entscheider", text:
-            "Typische Ängste:\n1. Hohe Kosten\n2. Komplexität\n\nTypische Ziele:\n1. Effizienz\n2. Sicherheit\n\nTypische Vorurteile:\n1. Schon probiert\n2. Funktioniert nicht" },
-          { heading: "Vorteile deines Angebots", text:
-            "Typische Ängste:\n1. Wir nehmen sie ernst\n\nTypische Ziele:\n1. Wir erfüllen sie\n\nTypische Vorurteile:\n1. Wir widerlegen sie" },
-          { heading: "Dein Positionierungs-Vorschlag", text:
-            "Wir sind der Partner für sichere, effiziente IT-Lösungen im Mittelstand." }
+          { heading: "Dein Angebot", text: "Kurzer Überblick …" },
+          { heading: "Deine Zielgruppe", text: "Die Zielgruppe sind …" },
+          { heading: "Wichtige Trigger für deine Entscheider", text: "Typische Ängste:\n1. …\n2. …\n\nTypische Ziele:\n1. …\n2. …\n\nTypische Vorurteile:\n1. …\n2. …" },
+          { heading: "Vorteile deines Angebots", text: "Typische Ängste – Beispiele:\n1. …\n2. …\n\nTypische Ziele – Beispiele:\n1. …\n2. …\n\nTypische Vorurteile – Beispiele:\n1. …\n2. …" },
+          { heading: "Dein Positionierungs-Vorschlag", text: "Unser Vorschlag lautet …" }
         ]
       }
     };
 
     const gpt = body.gpt || {};
-    const sections = Array.isArray(gpt.sections) ? gpt.sections : [];
+    const { valid, problems } = validatePayload(gpt);
 
-    // 2) Inhalts-PDF erstellen
+    // ---- DEBUG: zeige, was ankam
+    if (debugMode) {
+      return res.status(valid ? 200 : 400).json({
+        valid, problems,
+        received: gpt
+      });
+    }
+
+    if (!valid) {
+      return res.status(400).json({ error: "Ungültiger Payload.", problems });
+    }
+
+    // 2) Content-PDF erzeugen
     const contentPdf = await PDFDocument.create();
     contentPdf.registerFontkit(fontkit);
 
-    let regBytes = null, boldBytes = null;
-    try { regBytes = await fs.readFile(path.join(STATIC_DIR, "Poppins-Regular.ttf")); } catch {}
+    // Fonts
+    let regBytes=null, boldBytes=null;
+    try { regBytes  = await fs.readFile(path.join(STATIC_DIR, "Poppins-Regular.ttf")); } catch {}
     try { boldBytes = await fs.readFile(path.join(STATIC_DIR, "Poppins-SemiBold.ttf")); } catch {}
 
-    const regFont = regBytes ? await contentPdf.embedFont(regBytes) : await contentPdf.embedFont(StandardFonts.Helvetica);
+    const regFont  = regBytes  ? await contentPdf.embedFont(regBytes)  : await contentPdf.embedFont(StandardFonts.Helvetica);
     const boldFont = boldBytes ? await contentPdf.embedFont(boldBytes) : await contentPdf.embedFont(StandardFonts.HelveticaBold);
-
     const fonts = { regular: regFont, bold: boldFont };
 
-    const W = 595, H = 842, M = 56;
-    const maxWidth = W - 2*M;
-
-    let page = contentPdf.addPage([W, H]);
-    let y = H - M;
+    // Seite(n)
+    const pageWidth = 595, pageHeight = 842, margin = 56, maxWidth = pageWidth - margin*2;
+    let page = contentPdf.addPage([pageWidth, pageHeight]);
+    let y = pageHeight - margin;
 
     const title = String(gpt.title || "Ergebnis");
-    page.drawText(title, { x: M, y, size: 20, font: fonts.bold, color: rgb(0,0,0) });
+    page.drawText(title, { x: margin, y, size: 20, font: fonts.bold, color: rgb(0,0,0) });
     y -= 28;
 
-    for (const sec of sections) {
-      const nextY = drawSection(page, fonts, M, y, maxWidth, sec.heading, sec.text, 12, 8);
-      if (nextY < M + 60) {
-        page = contentPdf.addPage([W, H]);
-        y = H - M;
+    for (const sec of gpt.sections || []) {
+      const nextY = drawSection(page, fonts, margin, y, maxWidth, sec.heading, sec.text, 12, 8);
+      if (nextY < margin + 80) {
+        page = contentPdf.addPage([pageWidth, pageHeight]);
+        y = pageHeight - margin;
       } else {
         y = nextY;
       }
@@ -121,44 +142,37 @@ export default async function handler(req, res) {
 
     const contentBytes = await contentPdf.save();
 
-    // 3) Statische PDFs einlesen (Deckblatt, Angebote)
-    let deckblattBytes = null, angebot1Bytes = null, angebot2Bytes = null;
-    try { deckblattBytes = await fs.readFile(path.join(STATIC_DIR, "deckblatt.pdf")); } catch {}
-    try { angebot1Bytes  = await fs.readFile(path.join(STATIC_DIR, "angebot1.pdf")); } catch {}
-    try { angebot2Bytes  = await fs.readFile(path.join(STATIC_DIR, "angebot2.pdf")); } catch {}
-
-    // 4) Mergen
+    // 3) Deckblatt + Angebots-PDFs mergen
     const merged = await PDFDocument.create();
-
-    async function addFromBytes(bytes) {
-      if (!bytes) return;
+    async function addPdfFromBytes(bytes) {
       const src = await PDFDocument.load(bytes, { updateMetadata: false });
       const pages = await merged.copyPages(src, src.getPageIndices());
       pages.forEach(p => merged.addPage(p));
     }
+    const deckblattBytes = await fs.readFile(path.join(STATIC_DIR, "deckblatt.pdf"));
+    const angebot1Bytes  = await fs.readFile(path.join(STATIC_DIR, "angebot1.pdf"));
+    const angebot2Bytes  = await fs.readFile(path.join(STATIC_DIR, "angebot2.pdf"));
 
-    await addFromBytes(deckblattBytes);
-    await addFromBytes(contentBytes);
-    await addFromBytes(angebot1Bytes);
-    await addFromBytes(angebot2Bytes);
+    await addPdfFromBytes(deckblattBytes);  // S.1
+    await addPdfFromBytes(contentBytes);    // S.2+
+    await addPdfFromBytes(angebot1Bytes);
+    await addPdfFromBytes(angebot2Bytes);
 
     const finalBytes = await merged.save();
 
-    // 5) Upload in Blob Store
-    const safe = slug(title, "Ergebnis");
-    const key = `reports/${Date.now()}-${safe}.pdf`;
+    // 4) Blob speichern und URL zurückgeben
+    const filenameSafe = (title || "Ergebnis").replace(/[^\p{L}\p{N}\-_. ]/gu, "").replace(/\s+/g, "-");
+    const key = `reports/${Date.now()}-${filenameSafe}.pdf`;
+    const blob = await put(key, Buffer.from(finalBytes), { access: "public", contentType: "application/pdf" });
 
-    const { url } = await put(key, Buffer.from(finalBytes), {
-      access: "public",
-      contentType: "application/pdf",
-    });
-
-    // 6) Antwort: nur die URL zurückgeben
-    res.setHeader("Content-Type", "application/json; charset=utf-8");
-    return res.status(200).send(JSON.stringify({ url }));
+    if (wantUrlOnly) {
+      return res.status(200).json({ url: blob.url });
+    }
+    res.setHeader("Content-Type", "application/json");
+    return res.status(200).json({ url: blob.url });
 
   } catch (err) {
-    console.error("[create-pdf] Fehler:", err);
+    console.error(err);
     return res.status(500).json({ error: "PDF-Erzeugung fehlgeschlagen", detail: String(err?.message || err) });
   }
 }

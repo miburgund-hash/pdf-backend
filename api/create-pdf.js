@@ -31,7 +31,7 @@ const GAPS = {
   afterListBlock: 14,    // Abstand zwischen "Typische Ängste" und der ersten Liste etc. minimal größer
   afterLi: 4,            // Abstand zwischen Listenzeilen
   afterLiGroup: 10,      // zusätzlicher Abstand nach 2. Beispiel je Gruppe (Vorteile)
-  blockGap: 22,          // Abstand zwischen Blöcken (z.B. Ängste→Ziele→Vorurteile)
+  blockGap: 22,          // Abstand zwischen Blöcken (z.B. Ängste→Ziele→Vorbehalte)
   bigGap: 30             // großer Abstand (z.B. vor "Vorteile deines Angebots" o.ä.)
 };
 
@@ -258,7 +258,7 @@ export default async function handler(req, res) {
               "4. Ziel D",
               "5. Ziel E",
               "",
-              "Typische Vorurteile:",
+              "Typische Vorbehalte:",
               "1. Vorurteil A",
               "2. Vorurteil B",
               "3. Vorurteil C",
@@ -282,7 +282,7 @@ export default async function handler(req, res) {
               "- 30 % weniger Dokumentationszeit",
               "- Sichtbar mehr Zeit für Patienten",
               "",
-              "Typische Vorurteile",
+              "Typische Vorbehalte",
               "1. Am Ende wird es teurer",
               "- Fixpreis-Garantie",
               "- Transparente Kostenstruktur",
@@ -339,7 +339,7 @@ export default async function handler(req, res) {
 
       const blockA = findBlock("Typische Ängste");
       const blockZ = findBlock("Typische Ziele");
-      const blockV = findBlock("Typische Vorurteile");
+      const blockV = findBlock("Typische Vorbehalte");
 
       // Ängste
       if (ensurePageSafeY(page, y)) { page = addNewPage(contentPdf); y = A4.h - MARGIN; }
@@ -361,9 +361,9 @@ export default async function handler(req, res) {
 
       y -= GAPS.blockGap;
 
-      // Vorurteile
+      // Vorbehalte
       if (ensurePageSafeY(page, y)) { page = addNewPage(contentPdf); y = A4.h - MARGIN; }
-      y = drawH3(page, fonts, y, "Typische Vorurteile");
+      y = drawH3(page, fonts, y, "Typische Vorbehalte");
       items = parseNumberedList(blockV);
       res = drawNumberedList(page, fonts, y, items);
       y = res.y;

@@ -24,7 +24,7 @@ const SIZES = {
 const GAPS = {
   afterH1: 20,         // H1 → erste SHL (halbiert ggü. früher)
   afterH2: 8,          // SHL → Absatz leicht reduziert
-  afterPara: 16,       // Paragraph → nächste Headline
+  afterPara: 22,       // << etwas vergrößert: Paragraph → nächste Headline
   afterListBlock: 14,  // etwas größer für „Typische …“ Sub-Headline
   afterLi: 4,
   afterLiGroup: 10,    // Luft nach Beispielgruppe (Punkt 1: …)
@@ -68,15 +68,6 @@ function drawTextWrapped(page, font, text, x, y, size, color = rgb(0,0,0)) {
   return yy;
 }
 
-function parseNumberedListFromLines(lines) {
-  const out = [];
-  for (const line of lines) {
-    const m = line.match(/^\s*(\d+)\.\s+(.+)$/);
-    if (m) out.push(m[2].trim());
-  }
-  return out;
-}
-
 function drawH2(page, fonts, y, text) {
   page.drawText(String(text), {
     x: MARGIN, y, size: SIZES.h2, font: fonts.bold, color: rgb(0,0,0)
@@ -85,7 +76,10 @@ function drawH2(page, fonts, y, text) {
 }
 
 function drawH3(page, fonts, y, text) {
-  page.drawText(String(text), {
+  // Suffixe wie „– Beispiele:“ entfernen & Vorurteile→Vorbehalte
+  let t = String(text).replace(/–\s*Beispiele:?$/i, "").trim();
+  t = t.replace(/Vorurteile/gi, "Vorbehalte");
+  page.drawText(t, {
     x: MARGIN, y, size: SIZES.h3, font: fonts.bold, color: rgb(0,0,0)
   });
   return y - (SIZES.h3 + GAPS.afterListBlock);
@@ -111,18 +105,15 @@ function drawNumberedList(page, fonts, y, items) {
 
 // Entfernt (optional) doppelte Titel-Prefixe aus Beispielzeilen
 function normalizeExample(ex, title) {
-  let s = String(ex || "").replace(/^[-–]\s+/, ""); // führenden Spiegelstrich entfernen
+  let s = String(ex || "").replace(/^[-–]\s+/, ""); // führenden Bullet entfernen
   s = s.replace(/^["„”]/, "").replace(/["“”]$/, ""); // Quotes weg
-
-  // Wenn Beispiel mit dem Titel beginnt + Trennstrich → weg
   const esc = title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const re = new RegExp(`^\\s*${esc}\\s*[–-]\\s*`, "i");
   s = s.replace(re, "");
-
   return s.trim();
 }
 
-// Für Vorteile: "Typische Ängste\n1. Titel\n- Bsp\n- Bsp\n2. Titel ... "
+// Für Vorteile: "Typische Ängste\n1. Titel\n- Bsp\n- Bsp\n2. Titel ..."
 function parseNestedListBlock(block) {
   const lines = String(block || "")
     .replace(/\r/g, "")
@@ -146,8 +137,8 @@ function parseNestedListBlock(block) {
       continue;
     }
 
-    if (/^[-–]\s+/.test(line)) {
-      const raw = line.replace(/^[-–]\s+/, "");
+    if (/^[-–•]\s+/.test(line)) {
+      const raw = line.replace(/^[-–•]\s+/, "");
       const ex = normalizeExample(raw, current?.title || "");
       if (!current) current = { title: "", examples: [] };
       current.examples.push(ex);
@@ -164,14 +155,16 @@ function drawNestedList(page, fonts, y, data) {
 
   // Sub-Headline "Typische Ängste/Ziele/Vorbehalte" (Anzeige mit „Vorbehalte“)
   if (data.header) {
-    let header = data.header.replace(/Vorurteile/gi, "Vorbehalte");
+    let header = data.header
+      .replace(/–\s*Beispiele:?$/i, "")    // "- Beispiele" entfernen
+      .replace(/Vorurteile/gi, "Vorbehalte");
     cursor = drawH3(page, fonts, cursor, header);
   }
 
   for (let idx = 0; idx < data.items.length; idx++) {
     const it = data.items[idx];
 
-    // 1. Zeile: "1. Titel" (nicht fett, gleiche Größe wie Fließtext)
+    // 1. Zeile: "1. Titel" (normal, nicht fett)
     const titleLine = `${idx + 1}. ${it.title}`;
     const titleLines = wrapLines(titleLine, fonts.regular, SIZES.li, MAX_W);
     for (const ln of titleLines) {
@@ -180,7 +173,7 @@ function drawNestedList(page, fonts, y, data) {
       if (needNewPage(cursor)) return { y: cursor, overflow: true };
     }
 
-    // Beispiele → jetzt als echte Bulletpoints „• “ (kein Spiegelstrich)
+    // Beispiele als Bulletpoints (•), nicht als Spiegelstrich
     for (let j = 0; j < it.examples.length; j++) {
       const ex = `• ${it.examples[j]}`;
       const exLines = wrapLines(ex, fonts.regular, SIZES.liSub, MAX_W - 12);
@@ -221,8 +214,7 @@ function parseTriggers(rawText) {
 
     const m = line.match(/^\s*(\d+)\.\s+(.+)$/);
     if (m && current) {
-      // „Vorurteile“ innerhalb des Inhalts ebenfalls ersetzen
-      blocks[current].push(m[2].trim().replace(/Vorurteile/gi, "Vorbehalte"));
+      blocks[current].push(m[2].trim());
     }
   }
   return blocks;
@@ -277,18 +269,18 @@ export default async function handler(req, res) {
             text: [
               "Typische Ängste",
               "1. Betrieb steht still bei Ausfall",
-              "- 99,9% Netzverfügbarkeit durch Redundanz",
-              "- Netzwerk läuft stabil – auch bei Ausfällen",
-
+              "• 99,9% Netzverfügbarkeit durch Redundanz",
+              "• Netzwerk läuft stabil – auch bei Ausfällen",
+              "",
               "Typische Ziele",
               "1. Mehr Zeit für Patienten",
-              "- 30 % weniger Dokumentationszeit",
-              "- Entlastung im Pflegealltag",
-
+              "• 30 % weniger Dokumentationszeit",
+              "• Entlastung im Pflegealltag",
+              "",
               "Typische Vorbehalte",
               "1. Am Ende wird es teurer",
-              "- Fixpreis-Garantie",
-              "- Transparente Kostenstruktur",
+              "• Fixpreis-Garantie",
+              "• Transparente Kostenstruktur",
             ].join("\n")
           },
           { heading: "Dein Positionierungs-Vorschlag", text: "In 6 Wochen zur digitalen Klinik …" }
@@ -326,18 +318,25 @@ export default async function handler(req, res) {
     page.drawText(title, { x: MARGIN, y, size: SIZES.h1, font: fonts.bold, color: rgb(0,0,0) });
     y -= SIZES.h1 + GAPS.afterH1;
 
+    // Wir puffern die Trigger, damit wir die Titel (1–5) für den Vorteile-Block nutzen können
+    let triggerTitles = { aengste: [], ziele: [], vorbehalte: [] };
+
     const drawParagraph = (heading, text) => {
       if (needNewPage(y)) { page = newPage(contentPdf); y = A4.h - MARGIN; }
       y = drawH2(page, fonts, y, heading);
       if (needNewPage(y)) { page = newPage(contentPdf); y = A4.h - MARGIN; }
-      // <<< NEU: „Vorurteile“ → „Vorbehalte“ in Fließtexten >>>
-      const normalized = String(text || "").replace(/Vorurteile/gi, "Vorbehalte");
-      y = drawTextWrapped(page, fonts.regular, normalized, MARGIN, y, SIZES.p);
+      y = drawTextWrapped(page, fonts.regular, text, MARGIN, y, SIZES.p);
       y -= GAPS.afterPara;
     };
 
     const drawTrigger = (rawText) => {
       const blocks = parseTriggers(rawText);
+      // Merken für Vorteile:
+      triggerTitles = {
+        aengste: blocks.aengste.slice(0, 5),
+        ziele: blocks.ziele.slice(0, 5),
+        vorbehalte: blocks.vorbehalte.slice(0, 5),
+      };
 
       // Ängste
       if (blocks.aengste.length) {
@@ -359,7 +358,7 @@ export default async function handler(req, res) {
         y -= GAPS.blockGap;
       }
 
-      // Vorbehalte
+      // Vorbehalte (inkl. „Vorurteile“)
       if (blocks.vorbehalte.length) {
         if (needNewPage(y)) { page = newPage(contentPdf); y = A4.h - MARGIN; }
         y = drawH3(page, fonts, y, "Typische Vorbehalte");
@@ -371,8 +370,7 @@ export default async function handler(req, res) {
     };
 
     const drawBenefits = (rawText) => {
-      // <<< NEU: global „Vorurteile“ → „Vorbehalte“ >>>
-      const text = String(rawText || "").replace(/\r/g, "").replace(/Vorurteile/gi, "Vorbehalte");
+      const text = String(rawText || "").replace(/\r/g, "");
       // Blöcke anhand von „Typische …“
       const blocks = text.split(/\n(?=Typische\s+)/i);
 
@@ -382,8 +380,20 @@ export default async function handler(req, res) {
         const parsed = parseNestedListBlock(block);
         if (!parsed.items.length && !parsed.header) continue;
 
-        // Header-Text auf "Vorbehalte" normalisieren (falls vom GPT anders geliefert)
-        parsed.header = parsed.header.replace(/Vorurteile/gi, "Vorbehalte");
+        // Header-Text auf "Vorbehalte" normalisieren und „– Beispiele“ entfernen
+        parsed.header = parsed.header
+          .replace(/–\s*Beispiele:?$/i, "")
+          .replace(/Vorurteile/gi, "Vorbehalte");
+
+        // Titel aus Triggern übernehmen (1–5), falls vorhanden
+        let sourceTitles = [];
+        if (/Ängste/i.test(parsed.header)) sourceTitles = triggerTitles.aengste;
+        else if (/Ziele/i.test(parsed.header)) sourceTitles = triggerTitles.ziele;
+        else if (/Vorbehalte/i.test(parsed.header)) sourceTitles = triggerTitles.vorbehalte;
+
+        parsed.items.forEach((it, idx) => {
+          if (sourceTitles[idx]) it.title = sourceTitles[idx];
+        });
 
         if (needNewPage(y)) { page = newPage(contentPdf); y = A4.h - MARGIN; }
         const res = drawNestedList(page, fonts, y, parsed);
@@ -413,7 +423,7 @@ export default async function handler(req, res) {
         continue;
       }
 
-      // Vorteile → immer neue Seite, Headline ganz oben (damit Seite 2)
+      // Vorteile → immer neue Seite, Headline ganz oben (Seite 2)
       if (/^Vorteile deines Angebots/i.test(heading)) {
         page = newPage(contentPdf);
         y = A4.h - MARGIN;

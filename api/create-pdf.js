@@ -13,7 +13,7 @@ const MARGIN = 56;
 const MAX_W = A4.w - MARGIN * 2;
 
 const SIZES = {
-  h1: 28,
+  h1: 24,
   h2: 18,
   h3: 14,
   p: 12,
@@ -22,7 +22,7 @@ const SIZES = {
 };
 
 const GAPS = {
-  afterH1: 20,
+  afterH1: 18,
   afterH2: 8,
   afterPara: 20,      // etwas größer, einheitlich
   afterListBlock: 14,

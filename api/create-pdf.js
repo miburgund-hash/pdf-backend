@@ -113,23 +113,30 @@ function normalizeExample(ex, title) {
   return s.trim();
 }
 
-// Für Vorteile: "Typische Ängste\n1. Titel\n- Bsp\n- Bsp\n2. Titel ..."
+/**
+ * Für Vorteile:
+ * - Normalfall: "Typische Ängste\n1. Titel\n• Bsp\n• Bsp\n2. Titel ..."
+ * - Flat-10-Fall (Problemfall): "Typische Ängste\n1. TitelA – BspA1\n2. TitelA – BspA2\n3. TitelB – BspB1\n4. TitelB – BspB2 ... 10."
+ *   => Paare bilden: (1,2), (3,4), (5,6), (7,8), (9,10)
+ */
 function parseNestedListBlock(block) {
-  const lines = String(block || "")
+  const rawLines = String(block || "")
     .replace(/\r/g, "")
     .split("\n")
     .map((l) => l.trim())
     .filter(Boolean);
 
-  const header = lines[0] && /^Typische\s+/i.test(lines[0]) ? lines[0] : "";
+  const header = rawLines[0] && /^Typische\s+/i.test(rawLines[0]) ? rawLines[0] : "";
   const startIndex = header ? 1 : 0;
 
-  const items = [];
+  // Erst Versuch: "echte" Struktur (1. Titel + Bullets)
+  let items = [];
   let current = null;
 
-  for (let i = startIndex; i < lines.length; i++) {
-    const line = lines[i];
+  for (let i = startIndex; i < rawLines.length; i++) {
+    const line = rawLines[i];
 
+    // 1. Titelzeilen?
     const m = line.match(/^(\d+)\.\s+(.*)$/);
     if (m) {
       if (current) items.push(current);
@@ -137,6 +144,7 @@ function parseNestedListBlock(block) {
       continue;
     }
 
+    // 2. Beispielzeilen (• / - / – am Zeilenanfang)
     if (/^[-–•]\s+/.test(line)) {
       const raw = line.replace(/^[-–•]\s+/, "");
       const ex = normalizeExample(raw, current?.title || "");
@@ -146,6 +154,37 @@ function parseNestedListBlock(block) {
     }
   }
   if (current) items.push(current);
+
+  // --- Heuristik: Flat-10-Fall erkennen & in 5×(Titel+2 Bullets) umbauen ---
+  // Kriterien:
+  //  - mind. 6 Zeilen als "Titel" erkannt
+  //  - KEINE Beispiele vorhanden
+  if (items.length >= 6 && items.every(it => (it.examples || []).length === 0)) {
+    const numbered = rawLines
+      .slice(startIndex)
+      .map(l => l.match(/^(\d+)\.\s+(.*)$/))
+      .filter(Boolean)
+      .map(m => m[2].trim());
+
+    if (numbered.length >= 6) {
+      const paired = [];
+      for (let i = 0; i < Math.min(10, numbered.length); i += 2) {
+        const l1 = numbered[i] || "";
+        const l2 = numbered[i + 1] || "";
+
+        // Split an " – " oder "-" (mit Umgebungs-Whitespace)
+        const [t1, e1] = l1.split(/\s[–-]\s/);
+        const [, e2] = l2.split(/\s[–-]\s/);
+
+        const title = (t1 || l1).trim();
+        const examples = [e1, e2].filter(Boolean).map(s => s.trim());
+
+        paired.push({ title, examples });
+        if (paired.length === 5) break; // genau 5 Punkte
+      }
+      if (paired.length) items = paired;
+    }
+  }
 
   return { header: header || "", items };
 }
@@ -174,7 +213,7 @@ function drawNestedList(page, fonts, y, data) {
     }
 
     // Beispiele als Bulletpoints (•), nicht als Spiegelstrich
-    for (let j = 0; j < it.examples.length; j++) {
+    for (let j = 0; j < (it.examples || []).length; j++) {
       const ex = `• ${it.examples[j]}`;
       const exLines = wrapLines(ex, fonts.regular, SIZES.liSub, MAX_W - 12);
       for (const exLn of exLines) {
@@ -268,19 +307,16 @@ export default async function handler(req, res) {
             heading: "Vorteile deines Angebots",
             text: [
               "Typische Ängste",
-              "1. Betrieb steht still bei Ausfall",
-              "• 99,9% Netzverfügbarkeit durch Redundanz",
-              "• Netzwerk läuft stabil – auch bei Ausfällen",
+              "1. Betrieb steht still bei Ausfall – 99,9% Netzverfügbarkeit durch Redundanz",
+              "2. Betrieb steht still bei Ausfall – Netzwerk läuft stabil – auch bei Ausfällen",
               "",
               "Typische Ziele",
-              "1. Mehr Zeit für Patienten",
-              "• 30 % weniger Dokumentationszeit",
-              "• Entlastung im Pflegealltag",
+              "1. Mehr Zeit für Patienten – 30 % weniger Dokumentationszeit",
+              "2. Mehr Zeit für Patienten – Entlastung im Pflegealltag",
               "",
               "Typische Vorbehalte",
-              "1. Am Ende wird es teurer",
-              "• Fixpreis-Garantie",
-              "• Transparente Kostenstruktur",
+              "1. Am Ende wird es teurer – Fixpreis-Garantie",
+              "2. Am Ende wird es teurer – Transparente Kostenstruktur",
             ].join("\n")
           },
           { heading: "Dein Positionierungs-Vorschlag", text: "In 6 Wochen zur digitalen Klinik …" }
@@ -318,7 +354,7 @@ export default async function handler(req, res) {
     page.drawText(title, { x: MARGIN, y, size: SIZES.h1, font: fonts.bold, color: rgb(0,0,0) });
     y -= SIZES.h1 + GAPS.afterH1;
 
-    // Wir puffern die Trigger, damit wir die Titel (1–5) für den Vorteile-Block nutzen können
+    // Trigger-Titel puffern für Vorteile
     let triggerTitles = { aengste: [], ziele: [], vorbehalte: [] };
 
     const drawParagraph = (heading, text) => {
@@ -331,47 +367,39 @@ export default async function handler(req, res) {
 
     const drawTrigger = (rawText) => {
       const blocks = parseTriggers(rawText);
-      // Merken für Vorteile:
       triggerTitles = {
         aengste: blocks.aengste.slice(0, 5),
         ziele: blocks.ziele.slice(0, 5),
         vorbehalte: blocks.vorbehalte.slice(0, 5),
       };
 
-      // Ängste
       if (blocks.aengste.length) {
         if (needNewPage(y)) { page = newPage(contentPdf); y = A4.h - MARGIN; }
         y = drawH3(page, fonts, y, "Typische Ängste");
         let res = drawNumberedList(page, fonts, y, blocks.aengste);
-        y = res.y;
-        if (res.overflow) { page = newPage(contentPdf); y = A4.h - MARGIN; }
+        y = res.y; if (res.overflow) { page = newPage(contentPdf); y = A4.h - MARGIN; }
         y -= GAPS.blockGap;
       }
 
-      // Ziele
       if (blocks.ziele.length) {
         if (needNewPage(y)) { page = newPage(contentPdf); y = A4.h - MARGIN; }
         y = drawH3(page, fonts, y, "Typische Ziele");
         let res = drawNumberedList(page, fonts, y, blocks.ziele);
-        y = res.y;
-        if (res.overflow) { page = newPage(contentPdf); y = A4.h - MARGIN; }
+        y = res.y; if (res.overflow) { page = newPage(contentPdf); y = A4.h - MARGIN; }
         y -= GAPS.blockGap;
       }
 
-      // Vorbehalte (inkl. „Vorurteile“)
       if (blocks.vorbehalte.length) {
         if (needNewPage(y)) { page = newPage(contentPdf); y = A4.h - MARGIN; }
         y = drawH3(page, fonts, y, "Typische Vorbehalte");
         let res = drawNumberedList(page, fonts, y, blocks.vorbehalte);
-        y = res.y;
-        if (res.overflow) { page = newPage(contentPdf); y = A4.h - MARGIN; }
+        y = res.y; if (res.overflow) { page = newPage(contentPdf); y = A4.h - MARGIN; }
         y -= GAPS.bigGap;
       }
     };
 
     const drawBenefits = (rawText) => {
       const text = String(rawText || "").replace(/\r/g, "");
-      // Blöcke anhand von „Typische …“
       const blocks = text.split(/\n(?=Typische\s+)/i);
 
       for (const block of blocks) {
@@ -380,7 +408,6 @@ export default async function handler(req, res) {
         const parsed = parseNestedListBlock(block);
         if (!parsed.items.length && !parsed.header) continue;
 
-        // Header-Text auf "Vorbehalte" normalisieren und „– Beispiele“ entfernen
         parsed.header = parsed.header
           .replace(/–\s*Beispiele:?$/i, "")
           .replace(/Vorurteile/gi, "Vorbehalte");
@@ -397,8 +424,7 @@ export default async function handler(req, res) {
 
         if (needNewPage(y)) { page = newPage(contentPdf); y = A4.h - MARGIN; }
         const res = drawNestedList(page, fonts, y, parsed);
-        y = res.y;
-        if (res.overflow) { page = newPage(contentPdf); y = A4.h - MARGIN; }
+        y = res.y; if (res.overflow) { page = newPage(contentPdf); y = A4.h - MARGIN; }
         y -= GAPS.blockGap;
       }
     };
@@ -408,13 +434,11 @@ export default async function handler(req, res) {
       const heading = String(sec.heading || "").trim();
       const text = String(sec.text || "").trim();
 
-      // Normale Abschnitte
       if (/^Dein Angebot$/i.test(heading) || /^Deine Zielgruppe$/i.test(heading)) {
         drawParagraph(heading, text);
         continue;
       }
 
-      // Trigger
       if (/^Wichtige Trigger/i.test(heading)) {
         if (needNewPage(y)) { page = newPage(contentPdf); y = A4.h - MARGIN; }
         y = drawH2(page, fonts, y, "Wichtige Trigger für deine Entscheider");
@@ -423,9 +447,8 @@ export default async function handler(req, res) {
         continue;
       }
 
-      // Vorteile → immer neue Seite, Headline ganz oben (Seite 2)
       if (/^Vorteile deines Angebots/i.test(heading)) {
-        page = newPage(contentPdf);
+        page = newPage(contentPdf); // Seite 2 sicherstellen
         y = A4.h - MARGIN;
         y = drawH2(page, fonts, y, "Vorteile deines Angebots");
         y -= 2;
@@ -433,7 +456,6 @@ export default async function handler(req, res) {
         continue;
       }
 
-      // Fallback
       drawParagraph(heading, text);
     }
 

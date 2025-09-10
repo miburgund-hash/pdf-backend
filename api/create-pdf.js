@@ -22,10 +22,10 @@ const SIZES = {
 };
 
 const GAPS = {
-  afterH1: 20,         // H1 → erste SHL (halbiert ggü. früher)
-  afterH2: 8,          // SHL → Absatz leicht reduziert
-  afterPara: 16,       // Paragraph → nächste Headline
-  afterListBlock: 14,  // etwas größer für „Typische …“ Sub-Headline
+  afterH1: 20,         // H1 → erste SHL
+  afterH2: 8,          // SHL → Absatz
+  afterPara: 20,       // (leicht vergrößert, überall gleich)
+  afterListBlock: 14,  // „Typische …“ Sub-Headline
   afterLi: 4,
   afterLiGroup: 10,    // Luft nach Beispielgruppe (Punkt 1: …)
   blockGap: 22,        // Ängste → Ziele → Vorbehalte
@@ -68,15 +68,6 @@ function drawTextWrapped(page, font, text, x, y, size, color = rgb(0,0,0)) {
   return yy;
 }
 
-function parseNumberedListFromLines(lines) {
-  const out = [];
-  for (const line of lines) {
-    const m = line.match(/^\s*(\d+)\.\s+(.+)$/);
-    if (m) out.push(m[2].trim());
-  }
-  return out;
-}
-
 function drawH2(page, fonts, y, text) {
   page.drawText(String(text), {
     x: MARGIN, y, size: SIZES.h2, font: fonts.bold, color: rgb(0,0,0)
@@ -91,34 +82,36 @@ function drawH3(page, fonts, y, text) {
   return y - (SIZES.h3 + GAPS.afterListBlock);
 }
 
-function drawNumberedList(page, fonts, y, items) {
+// ----- Nummerierte Liste über Seiten fortsetzen -----
+function drawNumberedListPaged(page, fonts, y, items, startIdx, getNewPage) {
   let cursor = y;
-  for (let i = 0; i < items.length; i++) {
-    const prefix = `${i + 1}. `;
-    const text = `${prefix}${items[i]}`;
+  let i = startIdx;
+
+  while (i < items.length) {
+    const text = `${i + 1}. ${items[i]}`;
     const lines = wrapLines(text, fonts.regular, SIZES.li, MAX_W);
+
     for (const ln of lines) {
+      if (needNewPage(cursor)) {
+        page = getNewPage();
+        cursor = A4.h - MARGIN;
+      }
       page.drawText(ln, { x: MARGIN, y: cursor, size: SIZES.li, font: fonts.regular, color: rgb(0,0,0) });
       cursor -= SIZES.li + 2;
-      if (needNewPage(cursor)) {
-        return { y: cursor, overflow: true };
-      }
     }
     cursor -= GAPS.afterLi;
+    i++;
   }
-  return { y: cursor, overflow: false };
+  return { page, y: cursor };
 }
 
 // Entfernt (optional) doppelte Titel-Prefixe aus Beispielzeilen
 function normalizeExample(ex, title) {
   let s = String(ex || "").replace(/^[-–]\s+/, ""); // führenden Bullet entfernen
   s = s.replace(/^["„”]/, "").replace(/["“”]$/, ""); // Quotes weg
-
-  // Wenn Beispiel mit dem Titel beginnt + Trennstrich → weg
   const esc = title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const re = new RegExp(`^\\s*${esc}\\s*[–-]\\s*`, "i");
   s = s.replace(re, "");
-
   return s.trim();
 }
 
@@ -160,16 +153,15 @@ function parseNestedListBlock(block) {
 }
 
 /**
- * NEU: bricht NICHT mehr ab, sondern legt bei Bedarf selbst eine neue Seite an
- * via getNewPage(). So gehen innerhalb eines Blocks keine Inhalte verloren.
+ * Draw Nested List (5 Punkte + Bullets) mit automatischem Seitenumbruch.
  */
 function drawNestedList(page, fonts, y, data, getNewPage) {
   let cursor = y;
 
-  // Sub-Headline "Typische Ängste/Ziele/Vorbehalte" (Anzeige mit „Vorbehalte“)
   if (data.header) {
-    let header = data.header.replace(/Vorurteile/gi, "Vorbehalte").replace(/\s*–\s*Beispiele:?/i, "");
-    // falls kurz vor Seitenende
+    let header = data.header
+      .replace(/Vorurteile/gi, "Vorbehalte")
+      .replace(/\s*–\s*Beispiele:?/i, "");
     if (needNewPage(cursor)) {
       page = getNewPage();
       cursor = A4.h - MARGIN;
@@ -180,10 +172,9 @@ function drawNestedList(page, fonts, y, data, getNewPage) {
   for (let idx = 0; idx < data.items.length; idx++) {
     const it = data.items[idx];
 
-    // 1. Zeile: "1. Titel" (hängender Einzug handled über Wrap + gleicher x)
+    // Nummerierte Zeile (mit hängendem Umbruch)
     const titleLine = `${idx + 1}. ${it.title}`;
-    let titleLines = wrapLines(titleLine, fonts.regular, SIZES.li, MAX_W);
-
+    const titleLines = wrapLines(titleLine, fonts.regular, SIZES.li, MAX_W);
     for (const ln of titleLines) {
       if (needNewPage(cursor)) {
         page = getNewPage();
@@ -192,11 +183,9 @@ function drawNestedList(page, fonts, y, data, getNewPage) {
       page.drawText(ln, { x: MARGIN, y: cursor, size: SIZES.li, font: fonts.regular, color: rgb(0,0,0) });
       cursor -= SIZES.li + 2;
     }
-
-    // etwas Luft vor Bullets
     cursor -= 2;
 
-    // Beispiele (Bullets, Einzug + hängender Zeilenumbruch)
+    // Bullets (mit hängendem Umbruch)
     for (let j = 0; j < it.examples.length; j++) {
       const ex = `• ${it.examples[j]}`;
       const exLines = wrapLines(ex, fonts.regular, SIZES.liSub, MAX_W - 16);
@@ -205,7 +194,6 @@ function drawNestedList(page, fonts, y, data, getNewPage) {
           page = getNewPage();
           cursor = A4.h - MARGIN;
         }
-        // erste Zeile mit Bullet bei x+12, Folgezeilen eingerückt
         const x = MARGIN + (li === 0 ? 12 : 16);
         page.drawText(exLines[li], { x, y: cursor, size: SIZES.liSub, font: fonts.regular, color: rgb(0,0,0) });
         cursor -= SIZES.liSub + 2;
@@ -236,7 +224,7 @@ function parseTriggers(rawText) {
     if (isHeader(line)) {
       if (/Ängste/i.test(line)) current = "aengste";
       else if (/Ziele/i.test(line)) current = "ziele";
-      else current = "vorbehalte"; // Vorbehalte/Vorurteile
+      else current = "vorbehalte";
       continue;
     }
 
@@ -361,9 +349,11 @@ export default async function handler(req, res) {
       if (blocks.aengste.length) {
         if (needNewPage(y)) { page = newPage(contentPdf); y = A4.h - MARGIN; }
         y = drawH3(page, fonts, y, "Typische Ängste");
-        let res = drawNumberedList(page, fonts, y, blocks.aengste);
-        y = res.y;
-        if (res.overflow) { page = newPage(contentPdf); y = A4.h - MARGIN; }
+        const res = drawNumberedListPaged(
+          page, fonts, y, blocks.aengste, 0,
+          () => { page = newPage(contentPdf); return page; }
+        );
+        page = res.page; y = res.y;
         y -= GAPS.blockGap;
       }
 
@@ -371,26 +361,29 @@ export default async function handler(req, res) {
       if (blocks.ziele.length) {
         if (needNewPage(y)) { page = newPage(contentPdf); y = A4.h - MARGIN; }
         y = drawH3(page, fonts, y, "Typische Ziele");
-        let res = drawNumberedList(page, fonts, y, blocks.ziele);
-        y = res.y;
-        if (res.overflow) { page = newPage(contentPdf); y = A4.h - MARGIN; }
+        const res = drawNumberedListPaged(
+          page, fonts, y, blocks.ziele, 0,
+          () => { page = newPage(contentPdf); return page; }
+        );
+        page = res.page; y = res.y;
         y -= GAPS.blockGap;
       }
 
-      // Vorbehalte (inkl. „Vorurteile“)
+      // Vorbehalte
       if (blocks.vorbehalte.length) {
         if (needNewPage(y)) { page = newPage(contentPdf); y = A4.h - MARGIN; }
         y = drawH3(page, fonts, y, "Typische Vorbehalte");
-        let res = drawNumberedList(page, fonts, y, blocks.vorbehalte);
-        y = res.y;
-        if (res.overflow) { page = newPage(contentPdf); y = A4.h - MARGIN; }
+        const res = drawNumberedListPaged(
+          page, fonts, y, blocks.vorbehalte, 0,
+          () => { page = newPage(contentPdf); return page; }
+        );
+        page = res.page; y = res.y;
         y -= GAPS.bigGap;
       }
     };
 
     const drawBenefits = (rawText) => {
       const text = String(rawText || "").replace(/\r/g, "");
-      // Blöcke anhand von „Typische …“
       const blocks = text.split(/\n(?=Typische\s+)/i);
 
       for (const block of blocks) {
@@ -399,15 +392,12 @@ export default async function handler(req, res) {
         const parsed = parseNestedListBlock(block);
         if (!parsed.items.length && !parsed.header) continue;
 
-        // Header-Text auf "Vorbehalte" normalisieren, „– Beispiele“ entfernen
         parsed.header = parsed.header
           .replace(/Vorurteile/gi, "Vorbehalte")
           .replace(/\s*–\s*Beispiele:?/i, "");
 
-        // Falls kurz vor Seitenende
         if (needNewPage(y)) { page = newPage(contentPdf); y = A4.h - MARGIN; }
 
-        // NEU: drawNestedList kann jetzt selbst umbrechen und weiterzeichnen
         const res = drawNestedList(
           page,
           fonts,
@@ -427,13 +417,11 @@ export default async function handler(req, res) {
       const heading = String(sec.heading || "").trim();
       const text = String(sec.text || "").trim();
 
-      // Normale Abschnitte
       if (/^Dein Angebot$/i.test(heading) || /^Deine Zielgruppe$/i.test(heading)) {
         drawParagraph(heading, text);
         continue;
       }
 
-      // Trigger
       if (/^Wichtige Trigger/i.test(heading)) {
         if (needNewPage(y)) { page = newPage(contentPdf); y = A4.h - MARGIN; }
         y = drawH2(page, fonts, y, "Wichtige Trigger für deine Entscheider");
@@ -442,7 +430,7 @@ export default async function handler(req, res) {
         continue;
       }
 
-      // Vorteile → immer neue Seite, Headline ganz oben (damit Seite 2)
+      // Vorteile -> Seite 2 Start
       if (/^Vorteile deines Angebots/i.test(heading)) {
         page = newPage(contentPdf);
         y = A4.h - MARGIN;
@@ -452,14 +440,14 @@ export default async function handler(req, res) {
         continue;
       }
 
-      // Fallback (z. B. „Dein Positionierungs-Vorschlag“ → NICHT erzwungen auf Seitenanfang)
+      // alles andere normal (z.B. Positionierungsvorschlag – kein Seitenanfang erzwingen)
       drawParagraph(heading, text);
     }
 
     // -------- 4) Content-PDF bytes --------
     const contentBytes = await contentPdf.save();
 
-    // -------- 5) Alles mergen (statische PDFs + Inhalt) --------
+    // -------- 5) Statische + Content mergen --------
     const merged = await PDFDocument.create();
 
     async function addPdfIfExists(filename) {
@@ -482,7 +470,7 @@ export default async function handler(req, res) {
 
     const finalBytes = await merged.save();
 
-    // -------- 6) Antwort --------
+    // -------- 6) Response --------
     if (asUrl) {
       if (!finalBytes || finalBytes.length < 1000) {
         throw new Error("PDF appears too small – aborting upload.");
@@ -512,5 +500,6 @@ export default async function handler(req, res) {
     });
   }
 }
+
 
 

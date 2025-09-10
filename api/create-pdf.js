@@ -13,7 +13,7 @@ const MARGIN = 56;
 const MAX_W = A4.w - MARGIN * 2;
 
 const SIZES = {
-  h1: 24,
+  h1: 28,
   h2: 18,
   h3: 14,
   p: 12,
@@ -22,7 +22,7 @@ const SIZES = {
 };
 
 const GAPS = {
-  afterH1: 18,
+  afterH1: 20,
   afterH2: 8,
   afterPara: 20,      // etwas größer, einheitlich
   afterListBlock: 14,
@@ -86,19 +86,14 @@ function drawNumberedListPagedHanging(page, fonts, y, items, getNewPage) {
     const prefixW = font.widthOfTextAtSize(prefix, SIZES.li);
     const content = String(items[i] || "");
 
-    // Erste Zeile: prefix + erster Teil, danach hängende Einrückung
-    // Wir splitten selbst: erste Linie bis MAX_W, Folgezeilen mit (MAX_W - prefixW)
-    // 1) Ersten Inhalt in Zeilen rechnen (ohne Prefix) mit schmalerer Breite
     const lines = wrapLines(content, font, SIZES.li, MAX_W - prefixW);
 
-    // erste Zeile: mit Prefix an x=MARGIN
     if (needNewPage(cursor)) { page = getNewPage(); cursor = A4.h - MARGIN; }
     page.drawText(prefix + lines[0], {
       x: MARGIN, y: cursor, size: SIZES.li, font, color: rgb(0,0,0),
     });
     cursor -= SIZES.li + 2;
 
-    // Folgezeilen: hängend eingerückt
     for (let l = 1; l < lines.length; l++) {
       if (needNewPage(cursor)) { page = getNewPage(); cursor = A4.h - MARGIN; }
       page.drawText(lines[l], {
@@ -144,23 +139,18 @@ function parseNestedListBlock(block) {
     rawLines.shift();
   }
 
-  // Sammeln (auch zusammenführen gleicher Titel)
   const map = new Map(); // title -> { title, examples: [] }
 
   for (const line of rawLines) {
-    // 1) Nummern-Eintrag?
     const m = line.match(/^(\d+)\.\s+(.+)$/);
     if (m) {
       let titlePart = m[2].trim();
       let firstEx = "";
-
-      // „Titel – Beispiel“ in der Nummernzeile?
       const split = titlePart.split(/\s+–\s+/);
       if (split.length >= 2) {
         titlePart = split[0].trim();
         firstEx = split.slice(1).join(" – ").trim();
       }
-
       const key = titlePart.toLowerCase();
       if (!map.has(key)) map.set(key, { title: titlePart, examples: [] });
       if (firstEx) {
@@ -169,8 +159,6 @@ function parseNestedListBlock(block) {
       }
       continue;
     }
-
-    // 2) Bullet-Zeile?
     if (/^[-–•]\s+/.test(line)) {
       const last = Array.from(map.values()).pop();
       if (last) {
@@ -181,7 +169,6 @@ function parseNestedListBlock(block) {
     }
   }
 
-  // Reihenfolge beibehalten, auf 5 begrenzen, pro Punkt 2 Beispiele
   const items = Array.from(map.values()).slice(0, 5).map(it => ({
     title: it.title,
     examples: (it.examples || []).slice(0, 2)
@@ -223,25 +210,32 @@ function drawNestedList(page, fonts, y, data, getNewPage) {
     }
     cursor -= 2; // kleine Luft Titel → Bullets
 
-    // Zwei Bullets (hängende Einrückung)
+    // ----- FIX: Bullet-Folgezeilen exakt bündig unter erster Zeile -----
     const bullets = (data.items[i].examples || []).slice(0, 2);
     for (const b of bullets) {
-      const blines = wrapLines(b, font, SIZES.liSub, MAX_W - 16);
+      const bulletPrefix = "• ";
+      const xBullet = MARGIN + 12;
+      const bulletPrefixW = font.widthOfTextAtSize(bulletPrefix, SIZES.liSub);
+
+      const blines = wrapLines(b, font, SIZES.liSub, MAX_W - (xBullet - MARGIN) - bulletPrefixW);
+
       if (needNewPage(cursor)) { page = getNewPage(); cursor = A4.h - MARGIN; }
       // erste Zeile mit Bullet
-      page.drawText("• " + blines[0], {
-        x: MARGIN + 12, y: cursor, size: SIZES.liSub, font, color: rgb(0,0,0),
+      page.drawText(bulletPrefix + blines[0], {
+        x: xBullet, y: cursor, size: SIZES.liSub, font, color: rgb(0,0,0),
       });
       cursor -= SIZES.liSub + 2;
 
+      // Folgezeilen: bündig unter dem Text nach dem Bullet
       for (let l = 1; l < blines.length; l++) {
         if (needNewPage(cursor)) { page = getNewPage(); cursor = A4.h - MARGIN; }
         page.drawText(blines[l], {
-          x: MARGIN + 16, y: cursor, size: SIZES.liSub, font, color: rgb(0,0,0),
+          x: xBullet + bulletPrefixW, y: cursor, size: SIZES.liSub, font, color: rgb(0,0,0),
         });
         cursor -= SIZES.liSub + 2;
       }
     }
+    // ---------------------------------------------------------------
 
     cursor -= GAPS.afterLiGroup;
   }
@@ -423,7 +417,6 @@ export default async function handler(req, res) {
         const parsed = parseNestedListBlock(block);
         if (!parsed.items.length && !parsed.header) continue;
 
-        // Header ist bereits normalisiert (ohne „– Beispiele“, mit „Vorbehalte“)
         if (needNewPage(y)) { page = newPage(contentPdf); y = A4.h - MARGIN; }
 
         const res = drawNestedList(
@@ -463,7 +456,7 @@ export default async function handler(req, res) {
         continue;
       }
 
-      // Positionierungsvorschlag o.ä.: normal weiter (kein erzwungener Seitenanfang)
+      // Positionierungsvorschlag etc. normal weiter
       drawParagraph(heading, text);
     }
 
@@ -523,6 +516,7 @@ export default async function handler(req, res) {
     });
   }
 }
+
 
 
 

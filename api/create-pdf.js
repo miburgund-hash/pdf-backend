@@ -5,472 +5,398 @@ import fs from "fs/promises";
 import path from "path";
 import { put } from "@vercel/blob";
 
+// -------------------- Konfiguration / Layout --------------------
 const STATIC_DIR = path.join(process.cwd(), "static");
 
-// -------- Layout-Konstanten --------
 const A4 = { w: 595, h: 842 };
 const MARGIN = 56;
-const MAX_W = A4.w - MARGIN * 2;
 
 const SIZES = {
-  h1: 28,
-  h2: 18,
-  h3: 14,
+  title: 28,
+  shl: 18,          // Abschnitts-Headline (z. B. "Dein Angebot")
+  shl2: 14,         // Unter-Headline (z. B. "Typische Ängste")
   p: 12,
-  li: 12,
-  liSub: 12,
+  bullet: 12,
 };
 
 const GAPS = {
-  afterH1: 20,         // H1 → erste SHL (halbiert ggü. früher)
-  afterH2: 8,          // SHL → Absatz leicht reduziert
-  afterPara: 16,       // Paragraph → nächste Headline
-  afterListBlock: 14,  // etwas größer für „Typische …“ Sub-Headline
-  afterLi: 4,
-  afterLiGroup: 10,    // Luft nach Beispielgruppe (Punkt 1: …)
-  blockGap: 22,        // Ängste → Ziele → Vorbehalte
-  bigGap: 30
+  title_to_shl1: 16,            // Abstand Titel -> erste Subheadline
+  after_shl: 8,                 // SHL -> Absatzbeginn
+  line: 2,                      // Zeilenabstand Fließtext
+  after_para_to_next_shl: 24,   // **größerer** Abstand Absatzende -> nächste SHL
+  list: 4,
+  listGroup: 8,
+  benefitsBetweenHeadAndBullets: 6, // SHL2 -> erste Bullet
+  benefitsBetweenBullets: 2,        // Bullet -> Bullet
+  benefitsBetweenItems: 8,          // nach 2. Bullet -> nächster Punkt
 };
 
-// -------- Utilities --------
+const COLORS = { text: rgb(0, 0, 0) };
+
+// -------------------- Helfer --------------------
 function wrapLines(text, font, size, maxWidth) {
-  const words = String(text || "").split(/\s+/);
+  const words = String(text ?? "").split(/\s+/);
   const lines = [];
   let line = "";
   for (const w of words) {
     const test = line ? line + " " + w : w;
-    const width = font.widthOfTextAtSize(test, size);
-    if (width > maxWidth && line) {
+    if (font.widthOfTextAtSize(test, size) > maxWidth && line) {
       lines.push(line);
       line = w;
-    } else {
-      line = test;
-    }
+    } else line = test;
   }
   if (line) lines.push(line);
   return lines;
 }
 
-function needNewPage(y) {
-  return y < 70;
-}
-function newPage(doc) {
-  return doc.addPage([A4.w, A4.h]);
-}
-
-function drawTextWrapped(page, font, text, x, y, size, color = rgb(0,0,0)) {
-  const lines = wrapLines(text, font, size, MAX_W);
-  let yy = y;
-  for (const ln of lines) {
-    page.drawText(ln, { x, y: yy, size, font, color });
-    yy -= size + 2;
-  }
-  return yy;
-}
-
-function parseNumberedListFromLines(lines) {
-  const out = [];
-  for (const line of lines) {
-    const m = line.match(/^\s*(\d+)\.\s+(.+)$/);
-    if (m) out.push(m[2].trim());
-  }
-  return out;
-}
-
-function drawH2(page, fonts, y, text) {
-  page.drawText(String(text), {
-    x: MARGIN, y, size: SIZES.h2, font: fonts.bold, color: rgb(0,0,0)
-  });
-  return y - (SIZES.h2 + GAPS.afterH2);
-}
-
-function drawH3(page, fonts, y, text) {
-  page.drawText(String(text), {
-    x: MARGIN, y, size: SIZES.h3, font: fonts.bold, color: rgb(0,0,0)
-  });
-  return y - (SIZES.h3 + GAPS.afterListBlock);
-}
-
-function drawNumberedList(page, fonts, y, items) {
+function drawWrappedText(page, font, text, x, y, size, maxWidth) {
   let cursor = y;
-  for (let i = 0; i < items.length; i++) {
-    const prefix = `${i + 1}. `;
-    const text = `${prefix}${items[i]}`;
-    const lines = wrapLines(text, fonts.regular, SIZES.li, MAX_W);
-    for (const ln of lines) {
-      page.drawText(ln, { x: MARGIN, y: cursor, size: SIZES.li, font: fonts.regular, color: rgb(0,0,0) });
-      cursor -= SIZES.li + 2;
-      if (needNewPage(cursor)) {
-        return { y: cursor, overflow: true };
-      }
-    }
-    cursor -= GAPS.afterLi;
+  const lines = wrapLines(text, font, size, maxWidth);
+  for (const ln of lines) {
+    page.drawText(ln, { x, y: cursor, size, font, color: COLORS.text });
+    cursor -= size + GAPS.line;
   }
-  return { y: cursor, overflow: false };
+  return cursor;
 }
 
-// Entfernt (optional) doppelte Titel-Prefixe aus Beispielzeilen
-function normalizeExample(ex, title) {
-  let s = String(ex || "").replace(/^[-–]\s+/, ""); // führenden Bullet entfernen
-  s = s.replace(/^["„”]/, "").replace(/["“”]$/, ""); // Quotes weg
-
-  // Wenn Beispiel mit dem Titel beginnt + Trennstrich → weg
-  const esc = title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const re = new RegExp(`^\\s*${esc}\\s*[–-]\\s*`, "i");
-  s = s.replace(re, "");
-
-  return s.trim();
+function ensureSpace(pdf, page, cursor, need, newPageTopY = A4.h - MARGIN) {
+  if (cursor - need < MARGIN) {
+    page = pdf.addPage([A4.w, A4.h]);
+    return { page, cursor: newPageTopY };
+  }
+  return { page, cursor };
 }
 
-// Für Vorteile: "Typische Ängste\n1. Titel\n- Bsp\n- Bsp\n2. Titel ..."
-function parseNestedListBlock(block) {
-  const lines = String(block || "")
-    .replace(/\r/g, "")
-    .split("\n")
-    .map((l) => l.trim())
+/** Normt "Vorurteile" → "Vorbehalte" in Headings */
+function normalizeHeading(s) {
+  return String(s || "")
+    .replace(/vorurteile/gi, "Vorbehalte")
+    .replace(/ Vorteil(e)?\s*deines\s*Angebots\s*–\s*Beispiele/gi, "Vorteile deines Angebots");
+}
+
+/** Parst Vorteil-Textblöcke (10 Zeilen → 5 Punkte mit je 2 Bullets) */
+function parseBenefitsBlock(raw) {
+  // Jede Zeile im Format: "1. Titel – Bullettext" bzw. "2. Titel – Bullettext" ...
+  const lines = String(raw || "")
+    .split(/\r?\n/)
+    .map(s => s.trim())
     .filter(Boolean);
 
-  const header = lines[0] && /^Typische\s+/i.test(lines[0]) ? lines[0] : "";
-  const startIndex = header ? 1 : 0;
-
+  // Gruppiere je 2 Zeilen → 1 Punkt mit 2 Bullets
   const items = [];
-  let current = null;
+  for (let i = 0; i < lines.length; i += 2) {
+    const l1 = lines[i] || "";
+    const l2 = lines[i + 1] || "";
+    // Titel extrahieren (Teil vor dem ersten " – "), Bullettexte nach dem " – "
+    const [t1, b1] = l1.split(/\s+–\s+/, 2);
+    const [t2, b2] = l2.split(/\s+–\s+/, 2);
 
-  for (let i = startIndex; i < lines.length; i++) {
-    const line = lines[i];
+    // Versuche, den Nummernpräfix "1. " etc. zu entfernen und den reinen Titel zu behalten
+    const title = (t1 || "").replace(/^\d+\.\s*/, "").trim();
+    const bullets = [];
+    if (b1) bullets.push(b1.trim());
+    if (b2) bullets.push(b2.trim());
 
-    const m = line.match(/^(\d+)\.\s+(.*)$/);
-    if (m) {
-      if (current) items.push(current);
-      current = { title: m[2].trim(), examples: [] };
-      continue;
-    }
+    // Titel optional auch aus t2 abgleichen, falls t1 leer/unklar
+    const cleanTitle = title || (t2 || "").replace(/^\d+\.\s*/, "").trim();
 
-    if (/^[-–]\s+/.test(line)) {
-      const raw = line.replace(/^[-–]\s+/, "");
-      const ex = normalizeExample(raw, current?.title || "");
-      if (!current) current = { title: "", examples: [] };
-      current.examples.push(ex);
-      continue;
+    if (cleanTitle) {
+      items.push({ title: cleanTitle, bullets });
     }
   }
-  if (current) items.push(current);
 
-  return { header: header || "", items };
+  // Max. 5 Punkte
+  return items.slice(0, 5);
 }
 
-function drawNestedList(page, fonts, y, data) {
+/** Render: nummerierter Punkt + 2 Bullets */
+function drawNumberedItemWithBullets(page, fonts, x, y, idx, title, bullets, maxWidth) {
   let cursor = y;
 
-  // Sub-Headline "Typische Ängste/Ziele/Vorbehalte" (Anzeige mit „Vorbehalte“)
-  if (data.header) {
-    let header = data.header.replace(/Vorurteile/gi, "Vorbehalte");
-    cursor = drawH3(page, fonts, cursor, header);
+  // Nummer + Titel (als SHL2)
+  const label = `${idx}. ${title}`;
+  page.drawText(label, { x, y: cursor, size: SIZES.shl2, font: fonts.bold, color: COLORS.text });
+  cursor -= SIZES.shl2 + GAPS.benefitsBetweenHeadAndBullets;
+
+  // 2 Bullets (nicht fett)
+  const bulletIndent = 16;
+  for (const b of bullets.slice(0, 2)) {
+    const bulletLine = `• ${b}`;
+    cursor = drawWrappedText(page, fonts.regular, bulletLine, x + bulletIndent, cursor, SIZES.bullet, maxWidth - bulletIndent);
+    cursor -= GAPS.benefitsBetweenBullets;
   }
 
-  for (let idx = 0; idx < data.items.length; idx++) {
-    const it = data.items[idx];
+  // Extra Abstand zum nächsten Item
+  cursor -= GAPS.benefitsBetweenItems;
+  return cursor;
+}
 
-    // 1. Zeile: "1. Titel"
-    const titleLine = `${idx + 1}. ${it.title}`;
-    const titleLines = wrapLines(titleLine, fonts.regular, SIZES.li, MAX_W);
-    for (const ln of titleLines) {
-      page.drawText(ln, { x: MARGIN, y: cursor, size: SIZES.li, font: fonts.regular, color: rgb(0,0,0) });
-      cursor -= SIZES.li + 2;
-      if (needNewPage(cursor)) return { y: cursor, overflow: true };
+// -------------------- Haupt-Renderer --------------------
+async function renderContentPdf(payload) {
+  const pdf = await PDFDocument.create();
+  pdf.registerFontkit(fontkit);
+
+  // Fonts
+  let regBytes = null, boldBytes = null;
+  try { regBytes = await fs.readFile(path.join(STATIC_DIR, "Poppins-Regular.ttf")); } catch {}
+  try { boldBytes = await fs.readFile(path.join(STATIC_DIR, "Poppins-SemiBold.ttf")); } catch {}
+
+  const regFont = regBytes ? await pdf.embedFont(regBytes) : await pdf.embedFont(StandardFonts.Helvetica);
+  const boldFont = boldBytes ? await pdf.embedFont(boldBytes) : await pdf.embedFont(StandardFonts.HelveticaBold);
+  const fonts = { regular: regFont, bold: boldFont };
+
+  const maxW = A4.w - MARGIN * 2;
+
+  // Seite 1 starten
+  let page = pdf.addPage([A4.w, A4.h]);
+  let y = A4.h - MARGIN;
+
+  const title = String(payload.title || "Deine persönliche Positionierung");
+  page.drawText(title, { x: MARGIN, y, size: SIZES.title, font: fonts.bold, color: COLORS.text });
+  y -= SIZES.title + GAPS.title_to_shl1;
+
+  // Durch Abschnitte iterieren
+  const sections = Array.isArray(payload.sections) ? payload.sections : [];
+
+  // Wir sammeln zunächst normalen Fließtext bis VORTEILE; VORTEILE kommt strikt auf Seite 2 oben.
+  const benefitsSection = sections.find(s => normalizeHeading(s.heading).toLowerCase() === "vorteile deines angebots");
+  const normalSections = sections.filter(s => normalizeHeading(s.heading).toLowerCase() !== "vorteile deines angebots");
+
+  // --- Normale Abschnitte (Seite 1 usw.) ---
+  for (const s of normalSections) {
+    const heading = normalizeHeading(s.heading);
+    // SHL
+    ({ page, cursor: y } = ensureSpace(pdf, page, y, SIZES.shl + GAPS.after_shl + 40));
+    page.drawText(heading, { x: MARGIN, y, size: SIZES.shl, font: fonts.bold, color: COLORS.text });
+    y -= SIZES.shl + GAPS.after_shl;
+
+    // Body
+    // „Vorurteile“ bereits als „Vorbehalte“ ersetzt
+    const body = String(s.text || "").replace(/typische\s+vorurteile/gi, "Typische Vorbehalte");
+    y = drawWrappedText(page, fonts.regular, body, MARGIN, y, SIZES.p, maxW);
+
+    // Abstand zu nächster SHL vergrößert
+    y -= GAPS.after_para_to_next_shl;
+  }
+
+  // --- Seite 2 oben: Vorteile deines Angebots ---
+  if (benefitsSection) {
+    // Neue Seite beginnen (Seite 2)
+    page = pdf.addPage([A4.w, A4.h]);
+    y = A4.h - MARGIN;
+
+    // Haupt-Headline Seite 2
+    page.drawText("Vorteile deines Angebots", {
+      x: MARGIN, y, size: SIZES.shl, font: fonts.bold, color: COLORS.text
+    });
+    y -= SIZES.shl + GAPS.after_shl;
+
+    // Unterblöcke "Typische Ängste", "Typische Ziele", "Typische Vorbehalte"
+    // Wir splitten den Text in 3 logische Segmente anhand dieser Marker (unabhängig von Groß-/Kleinschreibung).
+    const raw = String(benefitsSection.text || "").replace(/Vorurteile/gi, "Vorbehalte");
+    const parts = {
+      aengste: "",
+      ziele: "",
+      vorbehalte: "",
+    };
+
+    // Robust splitten
+    // Erlaubt: "Typische Ängste", "Typische Ziele", "Typische Vorbehalte"
+    const reA = /typische\s+ängste\s*:?/i;
+    const reZ = /typische\s+ziele\s*:?/i;
+    const reV = /typische\s+vorbehalte\s*:?/i;
+
+    const startA = raw.search(reA);
+    const startZ = raw.search(reZ);
+    const startV = raw.search(reV);
+
+    function segment(txt, start, nextStart) {
+      if (start < 0) return "";
+      const from = txt.slice(start).replace(/^[^\n]*\n?/, ""); // Zeile mit Marker weg
+      return nextStart > start ? txt.slice(start, nextStart) : txt.slice(start);
     }
 
-    // Beispiele (ohne Wiederholung des Titels)
-    for (let j = 0; j < it.examples.length; j++) {
-      const ex = `- ${it.examples[j]}`;
-      const exLines = wrapLines(ex, fonts.regular, SIZES.liSub, MAX_W - 12);
-      for (const exLn of exLines) {
-        page.drawText(exLn, { x: MARGIN + 12, y: cursor, size: SIZES.liSub, font: fonts.regular, color: rgb(0,0,0) });
-        cursor -= SIZES.liSub + 2;
-        if (needNewPage(cursor)) return { y: cursor, overflow: true };
+    // Schneide Bereiche
+    const aBlock = startA >= 0 ? raw.slice(startA) : "";
+    const zBlock = startZ >= 0 ? raw.slice(startZ) : "";
+    const vBlock = startV >= 0 ? raw.slice(startV) : "";
+
+    // Reine Inhalte (ohne Überschriftszeile) extrahieren
+    const aContent = startA >= 0 ? raw.slice(startA).replace(reA, "").trim() : "";
+    const zContent = startZ >= 0 ? raw.slice(startZ).replace(reZ, "").trim() : "";
+    const vContent = startV >= 0 ? raw.slice(startV).replace(reV, "").trim() : "";
+
+    // 1) Typische Ängste
+    if (aContent) {
+      // SHL2
+      page.drawText("Typische Ängste", { x: MARGIN, y, size: SIZES.shl2, font: fonts.bold, color: COLORS.text });
+      y -= SIZES.shl2 + GAPS.after_shl;
+
+      const items = parseBenefitsBlock(aContent);
+      for (let i = 0; i < items.length; i++) {
+        ({ page, cursor: y } = ensureSpace(pdf, page, y, SIZES.shl2 + 2 * (SIZES.bullet + GAPS.benefitsBetweenBullets) + 30));
+        y = drawNumberedItemWithBullets(page, fonts, MARGIN, y, i + 1, items[i].title, items[i].bullets, maxW);
       }
+
+      y -= GAPS.after_para_to_next_shl;
     }
 
-    cursor -= GAPS.afterLiGroup;
-    if (needNewPage(cursor)) return { y: cursor, overflow: true };
-  }
-  return { y: cursor, overflow: false };
-}
+    // 2) Typische Ziele
+    if (zContent) {
+      page.drawText("Typische Ziele", { x: MARGIN, y, size: SIZES.shl2, font: fonts.bold, color: COLORS.text });
+      y -= SIZES.shl2 + GAPS.after_shl;
 
-// -------- Robuster Trigger-Parser (Zeilenbasiert) --------
-function parseTriggers(rawText) {
-  const lines = String(rawText || "")
-    .replace(/\r/g, "")
-    .split("\n")
-    .map((l) => l.trim());
+      const items = parseBenefitsBlock(zContent);
+      for (let i = 0; i < items.length; i++) {
+        ({ page, cursor: y } = ensureSpace(pdf, page, y, SIZES.shl2 + 2 * (SIZES.bullet + GAPS.benefitsBetweenBullets) + 30));
+        y = drawNumberedItemWithBullets(page, fonts, MARGIN, y, i + 1, items[i].title, items[i].bullets, maxW);
+      }
 
-  const blocks = { aengste: [], ziele: [], vorbehalte: [] };
-  let current = null; // "aengste" | "ziele" | "vorbehalte"
-
-  const isHeader = (l) => /^Typische\s+(Ängste|Ziele|Vorbehalte|Vorurteile)\s*:?\s*$/i.test(l);
-
-  for (const line of lines) {
-    if (!line) continue;
-
-    if (isHeader(line)) {
-      if (/Ängste/i.test(line)) current = "aengste";
-      else if (/Ziele/i.test(line)) current = "ziele";
-      else current = "vorbehalte"; // Vorbehalte/Vorurteile
-      continue;
+      y -= GAPS.after_para_to_next_shl;
     }
 
-    const m = line.match(/^\s*(\d+)\.\s+(.+)$/);
-    if (m && current) {
-      blocks[current].push(m[2].trim());
+    // 3) Typische Vorbehalte (statt Vorurteile)
+    if (vContent) {
+      page.drawText("Typische Vorbehalte", { x: MARGIN, y, size: SIZES.shl2, font: fonts.bold, color: COLORS.text });
+      y -= SIZES.shl2 + GAPS.after_shl;
+
+      const items = parseBenefitsBlock(vContent);
+      for (let i = 0; i < items.length; i++) {
+        ({ page, cursor: y } = ensureSpace(pdf, page, y, SIZES.shl2 + 2 * (SIZES.bullet + GAPS.benefitsBetweenBullets) + 30));
+        y = drawNumberedItemWithBullets(page, fonts, MARGIN, y, i + 1, items[i].title, items[i].bullets, maxW);
+      }
+
+      y -= GAPS.after_para_to_next_shl;
     }
   }
-  return blocks;
+
+  return pdf.save();
 }
 
-// -------- API Handler --------
+// -------------------- Merge mit statischen PDFs + Upload --------------------
+async function buildFinalPdf(payload) {
+  const contentBytes = await renderContentPdf(payload);
+
+  // Deckblatt + Angebotsseiten
+  const merged = await PDFDocument.create();
+
+  // Helper: PDF aus Bytes anhängen
+  async function addPdf(bytes) {
+    const src = await PDFDocument.load(bytes, { updateMetadata: false });
+    const pages = await merged.copyPages(src, src.getPageIndices());
+    pages.forEach(p => merged.addPage(p));
+  }
+
+  // Seite 1 (Deckblatt)
+  const deck = await fs.readFile(path.join(STATIC_DIR, "deckblatt.pdf"));
+  await addPdf(deck);
+
+  // Inhalt (Seite 2/3 …)
+  const contentDoc = await PDFDocument.load(contentBytes);
+  const pages = await merged.copyPages(contentDoc, contentDoc.getPageIndices());
+  pages.forEach(p => merged.addPage(p));
+
+  // Angebotsseiten 4 & 5
+  const an1 = await fs.readFile(path.join(STATIC_DIR, "angebot1.pdf"));
+  const an2 = await fs.readFile(path.join(STATIC_DIR, "angebot2.pdf"));
+  await addPdf(an1);
+  await addPdf(an2);
+
+  return merged.save();
+}
+
+// -------------------- API-Handler --------------------
 export default async function handler(req, res) {
   // CORS
-  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Origin", "https://burgundmerz.de");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") return res.status(200).end();
 
-  const isDemo = req.method === "GET";
-  if (req.method !== "POST" && !isDemo) return res.status(405).send("Method Not Allowed");
+  const as = String(req.query.as || "").toLowerCase(); // "url" → nur URL ausgeben
 
   try {
-    const asUrl = String(req.query.as || "").toLowerCase() === "url";
-
-    // -------- 1) Daten --------
-    const body = !isDemo ? (req.body || {}) : {
-      gpt: {
-        title: "Deine persönliche Positionierung",
-        sections: [
-          { heading: "Dein Angebot", text: "Demo-Angebot ..." },
-          { heading: "Deine Zielgruppe", text: "Demo-Zielgruppe ..." },
-          {
-            heading: "Wichtige Trigger für deine Entscheider",
-            text: [
-              "Typische Ängste:",
-              "1. Angst A",
-              "2. Angst B",
-              "3. Angst C",
-              "4. Angst D",
-              "5. Angst E",
-              "Typische Vorbehalte:",
-              "1. Vorbehalt A",
-              "2. Vorbehalt B",
-              "3. Vorbehalt C",
-              "4. Vorbehalt D",
-              "5. Vorbehalt E",
-              "Typische Ziele:",
-              "1. Ziel A",
-              "2. Ziel B",
-              "3. Ziel C",
-              "4. Ziel D",
-              "5. Ziel E",
-            ].join("\n")
+    const isDemo = req.method === "GET";
+    const body = !isDemo
+      ? (req.body || {})
+      : {
+          gpt: {
+            title: "Deine persönliche Positionierung",
+            sections: [
+              { heading: "Dein Angebot", text: "Demo-Fließtext …" },
+              { heading: "Deine Zielgruppe", text: "Demo-Fließtext …" },
+              {
+                heading: "Wichtige Trigger für deine Entscheider",
+                text:
+                  "Typische Ängste:\n" +
+                  "1. Punkt A\n2. Punkt B\n3. Punkt C\n4. Punkt D\n5. Punkt E\n\n" +
+                  "Typische Ziele:\n" +
+                  "1. Ziel A\n2. Ziel B\n3. Ziel C\n4. Ziel D\n5. Ziel E\n\n" +
+                  "Typische Vorbehalte:\n" + // schon normiert
+                  "1. Vorbehalt A\n2. Vorbehalt B\n3. Vorbehalt C\n4. Vorbehalt D\n5. Vorbehalt E",
+              },
+              {
+                heading: "Vorteile deines Angebots",
+                text:
+                  "Typische Ängste:\n" +
+                  "1. Ein Cyberangriff legt das Krankenhaus lahm – 99,9% Netzverfügbarkeit durch Redundanz\n" +
+                  "1. Ein Cyberangriff legt das Krankenhaus lahm – Netzwerk läuft stabil, selbst bei Störungen\n" +
+                  "2. Patientendaten gelangen in falsche Hände – DSGVO-/KHZG-konforme Lösung, revisionssicher\n" +
+                  "2. Patientendaten gelangen in falsche Hände – Zugriffskontrollen & Verschlüsselung\n" +
+                  "3. Fördergelder werden nicht genutzt – Audit-Vorbereitung, Anforderungen geprüft\n" +
+                  "3. Fördergelder werden nicht genutzt – Strukturierter Compliance-Check\n" +
+                  "4. Projekte werden teurer – Fixpreis-Angebote ohne Nachschläge\n" +
+                  "4. Projekte werden teurer – Klare Vertragsmodelle & Budgettransparenz\n" +
+                  "5. IT-Umstellung blockiert Betrieb – Migration in 30 Tagen bei laufendem Betrieb\n" +
+                  "5. IT-Umstellung blockiert Betrieb – Projektplanung bindet Klinikpersonal ein\n\n" +
+                  "Typische Ziele:\n" +
+                  "1. Mehr Zeit für Patienten – Dokumentation -30 % Schreibzeit\n" +
+                  "1. Mehr Zeit für Patienten – Automatisierte Prozesse entlasten Teams\n" +
+                  "2. Zukunftssichere IT – Cloud-Architektur, 3x schneller erweiterbar\n" +
+                  "2. Zukunftssichere IT – Systeme wachsen mit (Upgradefähigkeit)\n" +
+                  "3. Arbeitgebermarke stärken – Digitale Services eingeführt in 6 Wochen\n" +
+                  "3. Arbeitgebermarke stärken – Klinik als moderner Arbeitgeber wahrgenommen\n" +
+                  "4. Effizienzgewinne – Digitale Prozesse ohne Zusatzaufwand\n" +
+                  "4. Effizienzgewinne – Transparente Abläufe statt Papier\n" +
+                  "5. Amortisation & Planbarkeit – Klare Budgets, feste Laufzeiten\n" +
+                  "5. Amortisation & Planbarkeit – Kosten klar planbar\n\n" +
+                  "Typische Vorbehalte:\n" +
+                  "1. Umsetzung dauert zu lange – Schrittweise Einführung, keine Downtime\n" +
+                  "1. Umsetzung dauert zu lange – Go-Live in 6 Wochen (Praxisbeispiel)\n" +
+                  "2. Anbieter versteht Klinik-Alltag nicht – Referenzen, echte Klinik-Projekte\n" +
+                  "2. Anbieter versteht Klinik-Alltag nicht – Nachweisbare Ergebnisse schaffen Vertrauen\n" +
+                  "3. Betrieb wird blockiert – Einführung im Hintergrund (kein Ausfall)\n" +
+                  "3. Betrieb wird blockiert – Reaktionszeit & Support vertraglich fixiert\n" +
+                  "4. Am Ende teurer als kalkuliert – Fixpreis ohne Nachschläge\n" +
+                  "4. Am Ende teurer als kalkuliert – Transparente Leistungsumfänge\n" +
+                  "5. Nur Standard-Projekt – Individuelle Anpassungen möglich\n" +
+                  "5. Nur Standard-Projekt – Module passgenau auswählbar",
+              },
+              { heading: "Dein Positionierungs-Vorschlag", text: "Demo-Claim …" },
+            ],
           },
-          {
-            heading: "Vorteile deines Angebots",
-            text: [
-              "Typische Ängste",
-              "1. Betrieb steht still bei Ausfall",
-              "- 99,9% Netzverfügbarkeit durch Redundanz",
-              "- Netzwerk läuft stabil – auch bei Ausfällen",
-              "",
-              "Typische Ziele",
-              "1. Mehr Zeit für Patienten",
-              "- 30 % weniger Dokumentationszeit",
-              "- Entlastung im Pflegealltag",
-              "",
-              "Typische Vorbehalte",
-              "1. Am Ende wird es teurer",
-              "- Fixpreis-Garantie",
-              "- Transparente Kostenstruktur",
-            ].join("\n")
-          },
-          { heading: "Dein Positionierungs-Vorschlag", text: "In 6 Wochen zur digitalen Klinik …" }
-        ]
-      }
-    };
+        };
 
     const gpt = body.gpt || {};
-    const sections = Array.isArray(gpt.sections) ? gpt.sections : [];
-    const title = String(gpt.title || "Deine persönliche Positionierung");
+    const finalBytes = await buildFinalPdf(gpt);
 
-    // -------- 2) Content-PDF --------
-    const contentPdf = await PDFDocument.create();
-    contentPdf.registerFontkit(fontkit);
+    // Upload (öffentliche URL zurückgeben)
+    const filename =
+      `reports/${Date.now()}-Deine-persönliche-Positionierung-${Math.random().toString(36).slice(2)}.pdf`;
 
-    // Fonts
-    let regBytes = null, boldBytes = null;
-    try { regBytes = await fs.readFile(path.join(STATIC_DIR, "Poppins-Regular.ttf")); } catch {}
-    try { boldBytes = await fs.readFile(path.join(STATIC_DIR, "Poppins-SemiBold.ttf")); } catch {}
+    const { url } = await put(filename, Buffer.from(finalBytes), {
+      access: "public",
+      contentType: "application/pdf",
+    });
 
-    const regFont = regBytes
-      ? await contentPdf.embedFont(regBytes)
-      : await contentPdf.embedFont(StandardFonts.Helvetica);
-
-    const boldFont = boldBytes
-      ? await contentPdf.embedFont(boldBytes)
-      : await contentPdf.embedFont(StandardFonts.HelveticaBold);
-
-    const fonts = { regular: regFont, bold: boldFont };
-
-    let page = newPage(contentPdf);
-    let y = A4.h - MARGIN;
-
-    // H1
-    page.drawText(title, { x: MARGIN, y, size: SIZES.h1, font: fonts.bold, color: rgb(0,0,0) });
-    y -= SIZES.h1 + GAPS.afterH1;
-
-    const drawParagraph = (heading, text) => {
-      if (needNewPage(y)) { page = newPage(contentPdf); y = A4.h - MARGIN; }
-      y = drawH2(page, fonts, y, heading);
-      if (needNewPage(y)) { page = newPage(contentPdf); y = A4.h - MARGIN; }
-      y = drawTextWrapped(page, fonts.regular, text, MARGIN, y, SIZES.p);
-      y -= GAPS.afterPara;
-    };
-
-    const drawTrigger = (rawText) => {
-      const blocks = parseTriggers(rawText);
-
-      // Ängste
-      if (blocks.aengste.length) {
-        if (needNewPage(y)) { page = newPage(contentPdf); y = A4.h - MARGIN; }
-        y = drawH3(page, fonts, y, "Typische Ängste");
-        let res = drawNumberedList(page, fonts, y, blocks.aengste);
-        y = res.y;
-        if (res.overflow) { page = newPage(contentPdf); y = A4.h - MARGIN; }
-        y -= GAPS.blockGap;
-      }
-
-      // Ziele
-      if (blocks.ziele.length) {
-        if (needNewPage(y)) { page = newPage(contentPdf); y = A4.h - MARGIN; }
-        y = drawH3(page, fonts, y, "Typische Ziele");
-        let res = drawNumberedList(page, fonts, y, blocks.ziele);
-        y = res.y;
-        if (res.overflow) { page = newPage(contentPdf); y = A4.h - MARGIN; }
-        y -= GAPS.blockGap;
-      }
-
-      // Vorbehalte (inkl. „Vorurteile“)
-      if (blocks.vorbehalte.length) {
-        if (needNewPage(y)) { page = newPage(contentPdf); y = A4.h - MARGIN; }
-        y = drawH3(page, fonts, y, "Typische Vorbehalte");
-        let res = drawNumberedList(page, fonts, y, blocks.vorbehalte);
-        y = res.y;
-        if (res.overflow) { page = newPage(contentPdf); y = A4.h - MARGIN; }
-        y -= GAPS.bigGap;
-      }
-    };
-
-    const drawBenefits = (rawText) => {
-      const text = String(rawText || "").replace(/\r/g, "");
-      // Blöcke anhand von „Typische …“
-      const blocks = text.split(/\n(?=Typische\s+)/i);
-
-      for (const block of blocks) {
-        if (!block.trim()) continue;
-
-        const parsed = parseNestedListBlock(block);
-        if (!parsed.items.length && !parsed.header) continue;
-
-        // Header-Text auf "Vorbehalte" normalisieren
-        parsed.header = parsed.header.replace(/Vorurteile/gi, "Vorbehalte");
-
-        if (needNewPage(y)) { page = newPage(contentPdf); y = A4.h - MARGIN; }
-        const res = drawNestedList(page, fonts, y, parsed);
-        y = res.y;
-        if (res.overflow) { page = newPage(contentPdf); y = A4.h - MARGIN; }
-        y -= GAPS.blockGap;
-      }
-    };
-
-    // -------- 3) Sektionen rendern --------
-    for (const sec of sections) {
-      const heading = String(sec.heading || "").trim();
-      const text = String(sec.text || "").trim();
-
-      // Normale Abschnitte
-      if (/^Dein Angebot$/i.test(heading) || /^Deine Zielgruppe$/i.test(heading)) {
-        drawParagraph(heading, text);
-        continue;
-      }
-
-      // Trigger
-      if (/^Wichtige Trigger/i.test(heading)) {
-        if (needNewPage(y)) { page = newPage(contentPdf); y = A4.h - MARGIN; }
-        y = drawH2(page, fonts, y, "Wichtige Trigger für deine Entscheider");
-        y -= 4;
-        drawTrigger(text);
-        continue;
-      }
-
-      // Vorteile → immer neue Seite, Headline ganz oben (damit Seite 2)
-      if (/^Vorteile deines Angebots/i.test(heading)) {
-        page = newPage(contentPdf);
-        y = A4.h - MARGIN;
-        y = drawH2(page, fonts, y, "Vorteile deines Angebots");
-        y -= 2;
-        drawBenefits(text);
-        continue;
-      }
-
-      // Fallback
-      drawParagraph(heading, text);
-    }
-
-    // -------- 4) Content-PDF bytes --------
-    const contentBytes = await contentPdf.save();
-
-    // -------- 5) Alles mergen (statische PDFs + Inhalt) --------
-    const merged = await PDFDocument.create();
-
-    async function addPdfIfExists(filename) {
-      try {
-        const bytes = await fs.readFile(path.join(STATIC_DIR, filename));
-        const src = await PDFDocument.load(bytes, { updateMetadata: false });
-        const pages = await merged.copyPages(src, src.getPageIndices());
-        pages.forEach(p => merged.addPage(p));
-      } catch {}
-    }
-
-    await addPdfIfExists("deckblatt.pdf"); // Seite 1
-    {
-      const src = await PDFDocument.load(contentBytes, { updateMetadata: false });
-      const pages = await merged.copyPages(src, src.getPageIndices());
-      pages.forEach(p => merged.addPage(p));
-    }
-    await addPdfIfExists("angebot1.pdf"); // 4
-    await addPdfIfExists("angebot2.pdf"); // 5
-
-    const finalBytes = await merged.save();
-
-    // -------- 6) Antwort --------
-    if (asUrl) {
-      if (!finalBytes || finalBytes.length < 1000) {
-        throw new Error("PDF appears too small – aborting upload.");
-      }
-      const filenameBase = (title || "Ergebnis")
-        .replace(/[^\p{L}\p{N}\s\-_\.]/gu, "")
-        .replace(/\s+/g, "-");
-      const safeName = `reports/${Date.now()}-${filenameBase}.pdf`;
-
-      const { url } = await put(safeName, Buffer.from(finalBytes), {
-        access: "public",
-        contentType: "application/pdf",
-        cacheControl: "public, max-age=31536000, immutable",
-      });
-
+    if (as === "url") {
       return res.status(200).json({ url });
-    } else {
-      res.setHeader("Content-Type", "application/pdf");
-      res.setHeader("Content-Disposition", 'inline; filename="Ergebnis.pdf"');
-      return res.status(200).send(Buffer.from(finalBytes));
     }
+
+    // sonst: PDF direkt ausliefern
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", 'attachment; filename="Ergebnis.pdf"');
+    res.status(200).send(Buffer.from(finalBytes));
   } catch (err) {
     console.error(err);
     res.status(500).json({
@@ -479,4 +405,5 @@ export default async function handler(req, res) {
     });
   }
 }
+
 
